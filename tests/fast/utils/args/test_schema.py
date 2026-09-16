@@ -3,7 +3,33 @@ import argparse
 from typing import Annotated
 import pytest
 from pydantic import Field
-from miles.utils.args.schema import Arg, BaseConfig
+from miles.utils.args.schema import Arg, BaseConfig, validate_complete_config
+
+class _ChildConfig(BaseConfig):
+    count: int = 3
+
+class _ContainerConfig(BaseConfig):
+    child: _ChildConfig
+    children: list[_ChildConfig]
+    by_name: dict[str, _ChildConfig]
+    transient: int = Field(default=0, exclude=True)
+
+class TestCompleteConfig:
+
+    def test_explicit_defaults_and_excluded_runtime_fields_are_accepted(self) -> None:
+        """Explicit default values remain valid without serializing excluded runtime state."""
+        config = validate_complete_config(_ContainerConfig, {'child': {'count': 3}, 'children': [{'count': 0}], 'by_name': {'x': {'count': 4}}})
+        assert config.child.count == 3
+        assert config.children[0].count == 0
+        assert config.by_name['x'].count == 4
+
+    @pytest.mark.parametrize(('payload', 'path'), [({'child': {}, 'children': [], 'by_name': {}}, '_ContainerConfig.child'), ({'child': {'count': 1}, 'children': [{}], 'by_name': {}}, '_ContainerConfig.children[0]'), ({'child': {'count': 1}, 'children': [], 'by_name': {'x': {}}}, "_ContainerConfig.by_name['x']")])
+    def test_nested_omissions_report_the_exact_payload_location(self, payload: dict, path: str) -> None:
+        """Nested defaults cannot conceal incomplete transported configurations."""
+        with pytest.raises(ValueError) as error:
+            validate_complete_config(_ContainerConfig, payload)
+        assert path in str(error.value)
+        assert 'count' in str(error.value)
 
 class TestArgumentSchema:
 
