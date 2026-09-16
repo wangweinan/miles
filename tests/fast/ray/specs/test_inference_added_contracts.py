@@ -6,7 +6,7 @@ import pytest
 from tests.fast.ray.rollout.conftest import make_args
 
 from miles.backends.sglang_utils.sglang_config import SglangConfig
-from miles.ray.specs.inference import specs_inference_engine as _specs
+from miles.ray.specs.inference import InferenceEngineSpec
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +18,10 @@ def _make_args(**overrides: object) -> Namespace:
     args = make_args(**overrides)
     args.sglang = SglangConfig.parse_args(args)
     return args
+
+
+def _specs(args: Namespace) -> list[InferenceEngineSpec]:
+    return InferenceEngineSpec.create(args)
 
 
 class TestGroupDpPortReservation:
