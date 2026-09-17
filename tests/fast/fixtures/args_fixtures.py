@@ -1,4 +1,8 @@
 from __future__ import annotations
+import os
+from miles.utils.args.runtime import AllConfig
+from miles.utils.arguments import parse_args
+
 
 import argparse
 import contextlib
@@ -53,3 +57,19 @@ def parser_defaults() -> dict[str, Any]:
     with _with_relaxed_parser_required_args(parser), patch.object(sys, "argv", ["test"]):
         parsed, _ = parser.parse_known_args([])
     return {**_TRAIN_BACKEND_DEFAULTS, **vars(parsed), **_RESOLVED_AFTER_PARSING}
+
+
+_COMMON_TEST_ARGV = ['--rollout-batch-size', '2', '--num-rollout', '1', '--actor-num-gpus-per-node', '1', '--micro-batch-size', '1']
+
+
+_MEGATRON_TEST_ARGV = ['--train-backend', 'megatron', *_COMMON_TEST_ARGV, '--num-layers', '1', '--hidden-size', '128', '--num-attention-heads', '2']
+
+
+def parse_megatron_test_config(*argv: str) -> AllConfig:
+    return _parse_test_config([*_MEGATRON_TEST_ARGV, *argv])
+
+
+def _parse_test_config(argv: list[str]) -> AllConfig:
+    environment = {'RANK': '0', 'WORLD_SIZE': '1', 'LOCAL_RANK': '0', 'MILES_SCRIPT_ENV_REPORT': ''}
+    with patch.object(sys, 'argv', ['test', *argv]), patch.dict(os.environ, environment):
+        return parse_args()
