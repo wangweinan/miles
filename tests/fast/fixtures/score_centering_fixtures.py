@@ -4,6 +4,7 @@ from argparse import Namespace
 
 import numpy as np
 
+from miles.backends.sglang_utils.sglang_config import SglangConfig
 from miles.rollout.generate_utils.rollout_topk_logprobs import append_rollout_topk_logprobs
 from miles.utils.types import Sample
 
@@ -21,6 +22,7 @@ def _args(**overrides: object) -> Namespace:
         rollout_top_logprobs_num=3,
         rollout_sampling_logprobs_mode="selected",
         use_opd=False,
+        sglang_speculative_algorithm=None,
         opd_log_prob_top_k=0,
         opd_top_k_strategy="only-student",
         score_centering_is="none",
@@ -45,7 +47,9 @@ def _args(**overrides: object) -> Namespace:
         observe_training_entropy=False,
         use_kl_loss=False,
     )
-    return Namespace(**(values | overrides))
+    values.update(overrides)
+    sglang = SglangConfig(models=[], base_args={"speculative_algorithm": values["sglang_speculative_algorithm"]})
+    return Namespace(**values, sglang=sglang)
 
 
 def _turn(prompt: list[int], output: list[int], probabilities: list[float]) -> Sample:
