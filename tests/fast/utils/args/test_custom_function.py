@@ -1,9 +1,9 @@
 import argparse
+import pickle
 from types import SimpleNamespace
 from typing import Annotated
 import pytest
-from miles.utils.args.custom_function import resolve_custom_function_configs
-from miles.utils.args.custom_function import CustomFunctionConfig
+from miles.utils.args.custom_function import CustomFunctionConfig, _adapt_legacy_custom_config, resolve_custom_function_configs
 from miles.utils.args.schema import Arg, BaseConfig
 from miles.utils.function_registry import function_registry
 
@@ -33,6 +33,43 @@ class TestCustomFunctionResolution:
             resolve_custom_function_configs(_fill_hook_defaults(args))
         assert args.custom_megatron_before_log_prob_hook_path is None
         assert args.custom_megatron_init_path.path == 'hook'
+
+    def test_typed_hook_configuration_survives_json_and_pickle(self) -> None:
+        """Transport resolves the hook's concrete schema instead of losing custom fields."""
+        config = CustomFunctionConfig(path='hook', config=_HookConfig(threshold=0.7))
+        with function_registry.temporary('hook', SimpleNamespace(config_class=_HookConfig)):
+            restored = CustomFunctionConfig.model_validate_json(config.model_dump_json())
+            unpickled = pickle.loads(pickle.dumps(config))
+        assert type(restored.config) is _HookConfig
+        assert restored.config.threshold == 0.7
+        assert unpickled == restored
+
+class TestLegacyCustomArguments:
+
+    def test_positional_callbacks_and_required_fields_keep_their_contract(self) -> None:
+        """Legacy positional callbacks retain required fields and CLI value conversion."""
+
+        def register(parser: argparse.ArgumentParser, /) -> argparse.ArgumentParser:
+            parser.add_argument('--required-value', required=True, type=int)
+            parser.add_argument('--optional-value', default='fallback')
+            return parser
+        config_class = _adapt_legacy_custom_config(register)
+        parser = argparse.ArgumentParser()
+        config_class.add_arguments(parser=parser)
+        parsed = parser.parse_args(['--required-value', '9'])
+        assert config_class.model_validate(vars(parsed)).model_dump() == {'required_value': 9, 'optional_value': 'fallback'}
+        with pytest.raises(ValueError):
+            config_class.model_validate({})
+
+    def test_suppressed_defaults_cannot_be_silently_synthesized(self) -> None:
+        """A legacy suppressed argument remains required in the transport schema."""
+
+        def register(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument('--value', default=argparse.SUPPRESS)
+        config_class = _adapt_legacy_custom_config(register)
+        with pytest.raises(ValueError):
+            config_class.model_validate({})
+        assert config_class.model_validate({'value': 'present'}).model_dump() == {'value': 'present'}
 
 class TestCustomArgumentRegistration:
 
