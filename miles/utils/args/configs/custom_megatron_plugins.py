@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 
+from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.schema import A, Arg, BaseConfig
 
 
@@ -9,9 +10,18 @@ class CustomMegatronPluginsConfig(BaseConfig):
     This is a placeholder for any additional arguments that might be needed.
     """
 
-    custom_megatron_init_path: A[str | None, Arg()] = None
-    custom_megatron_before_log_prob_hook_path: A[str | None, Arg()] = None
-    custom_megatron_before_train_step_hook_path: A[str | None, Arg()] = None
+    custom_megatron_init_path: A[
+        CustomFunctionConfig | None,
+        Arg(),
+    ] = None
+    custom_megatron_before_log_prob_hook_path: A[
+        CustomFunctionConfig | None,
+        Arg(),
+    ] = None
+    custom_megatron_before_train_step_hook_path: A[
+        CustomFunctionConfig | None,
+        Arg(),
+    ] = None
 
 
 class Dsv4MegatronPluginsConfig(BaseConfig):

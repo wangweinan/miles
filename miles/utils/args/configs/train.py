@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.schema import A, Arg, BaseConfig
 
 
@@ -125,7 +126,7 @@ class TrainConfig(BaseConfig):
         ),
     ] = ()
     custom_model_provider_path: A[
-        str | None,
+        CustomFunctionConfig | None,
         Arg(
             help=(
                 "Path to a custom model provider function. "
@@ -133,7 +134,7 @@ class TrainConfig(BaseConfig):
                 "The function should have the signature "
                 "`def custom_model_provider(pre_process: bool, post_process: bool, vp_stage: int | None = None) -> GPTModel`. "
                 "Example: 'my_module.my_model_provider'."
-            )
+            ),
         ),
     ] = None
     recompute_loss_function: A[
