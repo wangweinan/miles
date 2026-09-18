@@ -9,7 +9,7 @@ from miles.utils.object_store_config import ObjectStoreBackend
 
 # rollout
 class RolloutRelatedConfig(BaseConfig):
-    custom_agent_function_path: str | None
+    custom_agent_function_path: A[CustomFunctionConfig | None, Arg()] = None
     use_sampling_support_replay: bool
     rollout_sampling_logprobs_mode: Literal["selected", "support"]
     rollout_top_logprobs_num: A[int, Arg()] = 0
