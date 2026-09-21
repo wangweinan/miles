@@ -44,3 +44,21 @@ class TestGroupDpPortReservation:
         assert [
             next(port.num_consecutive for port in spec.port_infos if port.name == "dist_init") for spec in specs
         ] == [35, 33]
+
+
+class TestEngineEnvironmentTiming:
+    def test_launch_reads_current_environment_after_spec_creation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Engine relaunches observe current environment values instead of a cached specification-time snapshot."""
+        monkeypatch.setenv("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "before")
+        args = _make_args()
+        (spec,) = _specs(args)
+        context = Namespace(args=args)
+
+        monkeypatch.setenv("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "first-launch")
+        first = spec.env_var(context)
+        monkeypatch.setenv("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "relaunch")
+        second = spec.env_var(context)
+
+        assert first["SGLANG_JIT_DEEPGEMM_PRECOMPILE"] == "first-launch"
+        assert second["SGLANG_JIT_DEEPGEMM_PRECOMPILE"] == "relaunch"
+        assert first is not second
