@@ -99,6 +99,26 @@ class TestResetArgument:
         reset_arg(parser=parser, name='--count', type=int, default=2)
         assert parser.parse_args(['--count', '8']).count == 8
 
+class TestConfigSlice:
+
+    def test_slicing_validates_the_leaf_and_drops_unowned_fields(self) -> None:
+        """A component receives only its own schema from the complete configuration."""
+
+        class Whole(_ChildConfig):
+            secret: str
+        source = Whole(count=7, secret='private')
+        result = _ChildConfig.slice_from(source)
+        assert result.model_dump() == {'count': 7}
+        assert source.secret == 'private'
+
+    def test_slicing_rejects_missing_fields_even_when_the_leaf_has_defaults(self) -> None:
+        """Defaults must not hide an ownership mismatch between component schemas."""
+
+        class Empty(BaseConfig):
+            pass
+        with pytest.raises(AssertionError, match='it lacks.*count'):
+            _ChildConfig.slice_from(Empty())
+
 class TestResetMetadata:
 
     def test_reset_metadata_updates_the_backend_default(self) -> None:
