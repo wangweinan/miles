@@ -873,3 +873,35 @@ class TestKeepingASecondaryFailureWhereNotesDoNotExist:
 
         assert "Additional task failure while cancelling peers" in caplog.text
         assert "RuntimeError: cleanup exploded" in caplog.text
+
+
+class TestDynamicLimitSemaphore:
+
+    async def test_shrinking_the_limit_waits_for_existing_holders_before_admitting_more(self) -> None:
+        """Scale-down preserves in-flight work and blocks new work until the observed limit permits it."""
+        limit = [2]
+        semaphore = async_utils.DynamicLimitSemaphore(lambda: limit[0])
+        await semaphore.__aenter__()
+        await semaphore.__aenter__()
+        limit[0] = 1
+        waiter = asyncio.create_task(semaphore.__aenter__())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await semaphore.__aexit__(None, None, None)
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await semaphore.__aexit__(None, None, None)
+        assert await asyncio.wait_for(waiter, timeout=1) is semaphore
+        await semaphore.__aexit__(None, None, None)
+
+    async def test_cancelling_a_waiter_does_not_consume_capacity(self) -> None:
+        """A cancelled generation request cannot reduce the capacity available to future requests."""
+        semaphore = async_utils.DynamicLimitSemaphore(lambda: 1)
+        async with semaphore:
+            waiter = asyncio.create_task(semaphore.__aenter__())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        assert await asyncio.wait_for(semaphore.__aenter__(), timeout=1) is semaphore
+        await semaphore.__aexit__(None, None, None)
