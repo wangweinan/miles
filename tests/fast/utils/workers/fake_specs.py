@@ -4,11 +4,14 @@ from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.args.runtime_base import BaseLeafConfig
 from miles.utils.workers.worker_spec import BaseCommandSpec, BaseServeSpec, LaunchCommandContext, SchedulingSpec, WorkerCtorContext, WorkerLaunchContext
 
+
 def _no_env_vars(_ctx: WorkerLaunchContext) -> dict[str, str]:
     return {}
 
+
 def _no_ctor_kwargs(_ctx: WorkerCtorContext) -> dict[str, Any]:
     return {}
+
 
 class FakeCommandSpec(BaseCommandSpec):
     args: Any = None
@@ -28,6 +31,7 @@ class FakeCommandSpec(BaseCommandSpec):
 
     def launch_command(self, ctx: LaunchCommandContext) -> str:
         return self.command(ctx)
+
 
 class FakeServeSpec(BaseServeSpec):
     worker_type: ClassVar[str] = 'fake'
