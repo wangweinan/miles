@@ -4,6 +4,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from miles.utils.workers.argv_utils import ORCHESTRATOR_CONFIG_FLAG
+
 _SECRET_ENV_VAR_PATTERN = re.compile(
     r"(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|DATABASE_URL)$", re.IGNORECASE
 )
@@ -98,6 +100,7 @@ def _argv_value_redactors() -> dict[str, Callable[[str], str]]:
 
     return {
         "--config": _redact_config_json,
+        ORCHESTRATOR_CONFIG_FLAG: _redact_config_json,
         **{flag(name): _redact for name in _SECRET_ARG_NAMES},
         **{flag(name): _redact_env_var_json for name in _ENV_VAR_ARG_NAMES},
         **{flag(name): _redact_url_userinfo for name in _URL_ARG_NAMES},

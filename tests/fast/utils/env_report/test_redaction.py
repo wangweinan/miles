@@ -194,7 +194,7 @@ class TestNormalizedRouterSecrets:
 
 
 class TestSerializedConfigSecrets:
-    @pytest.mark.parametrize("flag", ["--config"])
+    @pytest.mark.parametrize("flag", ["--config", "--orchestrator-config"])
     @pytest.mark.parametrize("inline", [False, True])
     def test_every_config_entrypoint_redacts_nested_secrets_and_preserves_safe_values(
         self, flag: str, inline: bool
