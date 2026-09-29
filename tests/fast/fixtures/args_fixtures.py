@@ -71,8 +71,15 @@ _COMMON_TEST_ARGV = ['--rollout-batch-size', '2', '--num-rollout', '1', '--actor
 _MEGATRON_TEST_ARGV = ['--train-backend', 'megatron', *_COMMON_TEST_ARGV, '--num-layers', '1', '--hidden-size', '128', '--num-attention-heads', '2']
 
 
+_FSDP_TEST_ARGV = ['--train-backend', 'fsdp', *_COMMON_TEST_ARGV]
+
+
 def parse_megatron_test_config(*argv: str) -> AllConfig:
     return _parse_test_config([*_MEGATRON_TEST_ARGV, *argv])
+
+
+def parse_fsdp_test_config(*argv: str) -> AllConfig:
+    return _parse_test_config([*_FSDP_TEST_ARGV, *argv])
 
 
 def _parse_test_config(argv: list[str]) -> AllConfig:
