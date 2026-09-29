@@ -29,6 +29,7 @@ from examples.experimental.verifiers.verifiers_rollout import (
 )
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
+from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.rollout.base_types import BaseRolloutFn, RolloutFnConstructorInput
 from miles.utils.types import Sample
 
@@ -753,3 +754,50 @@ class TestRolloutFnContract:
             VerifiersRolloutFn.__init__(adapter, constructor_input)
 
         assert adapter.constructor_input.data_source is data_source
+
+
+@pytest.mark.parametrize(
+    "models,expected",
+    [
+        ([("eval", "/eval/tokenizer"), ("default", "/generation/tokenizer")], "/generation/tokenizer"),
+        ([("primary", "/first/tokenizer"), ("eval", "/eval/tokenizer")], "/first/tokenizer"),
+        ([("eval", "/eval/tokenizer"), ("default", None)], "/model/fallback"),
+    ],
+)
+def test_train_client_selects_only_the_generation_models_tokenizer(
+    monkeypatch: pytest.MonkeyPatch, models: list[tuple[str, str | None]], expected: str
+) -> None:
+    """Generation uses its own tokenizer while a conflicting evaluation model remains isolated."""
+
+    class BaseTrainClient:
+        def __init__(self, transport: object, *, pool_size: int, renderer_model_name: str) -> None:
+            self.renderer_model_name = renderer_model_name
+
+    config = SglangConfig(
+        models=[
+            ModelConfig(
+                name=name,
+                model_path=None,
+                update_weights=name != "eval",
+                server_groups=[
+                    ServerGroupConfig(
+                        worker_type="regular",
+                        num_gpus_per_engine=1,
+                        needs_offload=False,
+                        overrides={"tokenizer_path": tokenizer},
+                    )
+                ],
+            )
+            for name, tokenizer in models
+        ],
+        base_args={"tokenizer_path": None},
+    )
+    before = config.model_dump()
+    monkeypatch.setattr(verifiers_rollout, "_renderer_identity", lambda _: None)
+
+    client = _train_client(
+        SimpleNamespace(TrainClient=BaseTrainClient), _args(sglang=config), "/model/fallback", pool_size=1
+    )
+
+    assert client.renderer_model_name == expected
+    assert config.model_dump() == before
