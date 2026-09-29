@@ -1,3 +1,5 @@
+from tests.fast.fixtures.args_fixtures import make_trainer_args
+
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -79,6 +81,16 @@ class TestCheckpointTrainingProvenance:
 
         assert result == (0, True)
 
+    @pytest.mark.parametrize('finetune', [False, True])
+    def test_loading_hf_weights_never_claims_restored_training_progress(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finetune: bool) -> None:
+        """HF weights initialize a model without restoring any completed rollout."""
+        (tmp_path / 'config.json').write_text('{}')
+        args = make_trainer_args(load=str(tmp_path), finetune=finetune, ckpt_step=None, lora_rank=0, lora_adapter_path=None)
+        monkeypatch.setattr(checkpoint, '_load_checkpoint_hf', lambda **_kwargs: (0, 0))
+        result = checkpoint.load_checkpoint(ddp_model=[], optimizer=None, opt_param_scheduler=None, checkpointing_context=None, skip_load_to_model_and_opt=False, args=args)
+        assert result.iteration == 0
+        assert result.restored_trained_iteration is False
+
 
 class TestRawMbridgeCompanionIsolation:
     @pytest.mark.parametrize("fail", [False, True])
@@ -105,3 +117,6 @@ class TestRawMbridgeCompanionIsolation:
             assert companion.weight_version.item() == 7
             assert companion.sample_consumptions.tolist() == [[1, 2, 3, 4, 0]]
             torch.testing.assert_close(model.weight, torch.full_like(model.weight, 5))
+
+
+
