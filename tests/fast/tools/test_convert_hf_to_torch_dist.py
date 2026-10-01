@@ -2,6 +2,7 @@ import sys
 from argparse import Namespace
 
 import pytest
+from tests.fast.import_isolation_utils import run_with_blocked_imports
 from tools.convert_hf_to_torch_dist import _configure_pipeline_parallel, _ConversionConfig, get_args
 
 
@@ -90,3 +91,20 @@ class TestConversionParser:
         assert args.backend.micro_batch_size == 1
         assert args.backend.save_interval == 1
         assert sys.argv is original_argv
+
+
+def test_conversion_parser_does_not_require_conversion_bridge_imports() -> None:
+    """Configuration inspection remains usable without loading optional conversion bridge implementations."""
+    run_with_blocked_imports(
+        blocked_prefixes=("mbridge", "miles_plugins.mbridge"),
+        script="""
+import os
+import sys
+os.environ.update(WORLD_SIZE="1", RANK="0")
+from tools.convert_hf_to_torch_dist import get_args
+sys.argv = ["convert", "--hf-checkpoint", "/unused", "--num-layers", "2", "--hidden-size", "128", "--num-attention-heads", "2"]
+args = get_args()
+assert args.train_backend == "megatron"
+assert args.backend.num_layers == 2
+""",
+    )
