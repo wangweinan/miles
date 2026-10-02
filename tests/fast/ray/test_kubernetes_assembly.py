@@ -460,6 +460,7 @@ class TestKubernetesDriverAssembly:
             num_epoch=3,
             debug_train_only=True,
             starts_inference_engines=False,
+            raw_megatron=SimpleNamespace(trainers=[]),
         )
 
         async def scenario():
@@ -467,7 +468,7 @@ class TestKubernetesDriverAssembly:
                 monkeypatch.setattr(http_utils.GeneralHttpClientProvider, "client", classmethod(lambda cls: client))
                 for app in apps.values():
                     await stack.enter_async_context(app.router.lifespan_context(app))
-                return await create_rollout_components(args, capability=capability)
+                return await create_rollout_components(args, capability=capability, trainer_handles={})
 
         result = asyncio.run(scenario())
 

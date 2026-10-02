@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from argparse import Namespace
 from types import SimpleNamespace
@@ -18,18 +19,20 @@ from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.ray import placement_group as placement_group_module
 from miles.ray.placement_group import (
     create_rollout_components,
+    create_trainer_handles,
     create_training_model,
     create_training_models,
     take_over_trainers,
 )
 from miles.ray.rollout.eval_fleet import EvalFleetInfo
-from miles.ray.rollout.inference_controller import UpdatableEngines
+from miles.ray.rollout.inference_controller import InferenceController, UpdatableEngines
 from miles.ray.rollout.server_cell import ServerCellMetadata
 from miles.ray.train.init_request import TrainerControllerInitRequest
 from miles.ray.train_actor import WeightUpdateOutput
 from miles.rollout.session.types import SessionServerInstance
 from miles.utils.audit_utils.checksum_utils import ChecksumCollectionFailure
 from miles.utils.args.runtime import AllConfig
+from miles.utils.context_lock import ContextLock
 from miles.utils.init_once import InitState
 from miles.utils.test_utils.fault_injector.models import FaultHookName
 from miles.utils.workers.types import DeployComponent, DeploymentIdentity
@@ -61,6 +64,7 @@ def fake_components():
     events: list[str] = []
 
     controller_handle = MagicMock(name="inference_controller")
+    controller_handle.abort_update_weights = AsyncMock()
     controller_handle.check_weights = AsyncMock()
     controller_handle.offload = AsyncMock()
     controller_handle.is_initialized = AsyncMock(return_value=False)
@@ -92,6 +96,8 @@ def fake_components():
 
     capability = FakeBackendCapability(static_provider=object())
 
+    trainer_handle = SimpleNamespace(wait_idle=AsyncMock())
+
     with patch(
         "miles.ray.placement_group.create_inference_controller_handle", lambda *, capability: controller_handle
     ), patch("miles.ray.placement_group.resolve_router_addrs", resolve_router_addrs), patch(
@@ -100,6 +106,7 @@ def fake_components():
         "miles.ray.placement_group.create_rollout_executor_handle", lambda *, capability: executor_handle
     ):
         yield Namespace(
+            trainer_handles={"actor": trainer_handle},
             controller_handle=controller_handle,
             executor_handle=executor_handle,
             capability=capability,
@@ -130,7 +137,9 @@ class TestCreateRolloutComponents:
         """Snapshot evaluation still needs session routing when training uses injected rollouts."""
         args = _make_args(num_rollout=1, debug_train_only=True, eval_num_gpus=1, use_session_server=True)
 
-        await create_rollout_components(args, capability=fake_components.capability)
+        await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert args.session_server_instances == [SessionServerInstance(addr="10.0.0.2:5000", instance_id="session-0")]
 
@@ -138,7 +147,9 @@ class TestCreateRolloutComponents:
         """The executor reads the session contract off args, so it must be written before init() runs."""
         args = _make_args(num_rollout=1, use_session_server=True)
 
-        await create_rollout_components(args, capability=fake_components.capability)
+        await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert fake_components.events == [
             "session_servers_ready",
@@ -152,7 +163,9 @@ class TestCreateRolloutComponents:
         """A hot restart finds the previous script's executor up, and initializing anything against it is the bug."""
         args = _make_args(num_rollout=1)
 
-        await create_rollout_components(args, capability=fake_components.capability)
+        await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert fake_components.events == ["executor_init_state_checked", "controller_init", "executor_init"]
 
@@ -160,7 +173,9 @@ class TestCreateRolloutComponents:
         """Both halves of rollout are independent workers, so the driver only ever holds handles."""
         args = _make_args(num_rollout=1)
 
-        controller, executor, _ = await create_rollout_components(args, capability=fake_components.capability)
+        controller, executor, _ = await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert controller is fake_components.controller_handle
         assert executor is fake_components.executor_handle
@@ -169,7 +184,9 @@ class TestCreateRolloutComponents:
         """The driver's args copy must carry the contract before anything downstream reads it."""
         args = _make_args(num_rollout=1)
 
-        await create_rollout_components(args, capability=fake_components.capability)
+        await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert (args.sglang_router_ip, args.sglang_router_port) == ("10.0.0.1", 4321)
 
@@ -177,7 +194,9 @@ class TestCreateRolloutComponents:
         """num_rollout comes from the dataset, which the executor owns."""
         args = _make_args(num_rollout=None, num_epoch=2)
 
-        _, _, num_rollout_per_epoch = await create_rollout_components(args, capability=fake_components.capability)
+        _, _, num_rollout_per_epoch = await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         fake_components.executor_handle.get_num_rollout_per_epoch.assert_awaited_once_with()
         assert num_rollout_per_epoch == 5
@@ -187,7 +206,9 @@ class TestCreateRolloutComponents:
         """An explicit --num-rollout skips asking the executor for the epoch length."""
         args = _make_args(num_rollout=3)
 
-        _, _, num_rollout_per_epoch = await create_rollout_components(args, capability=fake_components.capability)
+        _, _, num_rollout_per_epoch = await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         fake_components.executor_handle.get_num_rollout_per_epoch.assert_not_awaited()
         assert num_rollout_per_epoch is None
@@ -197,7 +218,9 @@ class TestCreateRolloutComponents:
         """--debug-train-only deploys no routers or session servers, so nothing can be waited on."""
         args = _make_args(num_rollout=1, debug_train_only=True)
 
-        await create_rollout_components(args, capability=fake_components.capability)
+        await create_rollout_components(
+            args, capability=fake_components.capability, trainer_handles=fake_components.trainer_handles
+        )
 
         assert fake_components.capability.requested_static_pool_ids == []
         assert args.sglang_router_ip is None
@@ -206,7 +229,11 @@ class TestCreateRolloutComponents:
 class TestTakeOverInference:
     @staticmethod
     async def _take_over(fake_components) -> None:
-        await create_rollout_components(_make_args(num_rollout=1), capability=fake_components.capability)
+        await create_rollout_components(
+            _make_args(num_rollout=1),
+            capability=fake_components.capability,
+            trainer_handles=fake_components.trainer_handles,
+        )
 
     async def test_a_cold_run_builds_the_controller_it_found_uninitialized(self, fake_components):
         """A cold start reaches plain init() and none of the reset, so the whole call sequence is pinned."""
@@ -230,6 +257,7 @@ class TestTakeOverInference:
         assert [name for name, _args, _kwargs in fake_components.controller_handle.mock_calls] == [
             "is_initialized",
             "wait_idle",
+            "abort_update_weights",
             "wait_expected_num_cells",
             "abort_all",
             "get_eval_fleet_info",
@@ -237,6 +265,25 @@ class TestTakeOverInference:
 
         fake_components.controller_handle.init.assert_not_awaited()
         fake_components.controller_handle.abort_all.assert_awaited_once_with()
+
+    async def test_take_over_recovers_the_lock_left_by_a_completed_weight_update(self, fake_components) -> None:
+        """Replacing the orchestrator between weight transfer and completion must not wedge inference."""
+        controller = InferenceController.__new__(InferenceController)
+        controller.args = SimpleNamespace(colocate=False)
+        controller.servers = {}
+        controller.context_lock = ContextLock("InferenceController")
+        await controller.start_update_weights()
+
+        handle = fake_components.controller_handle
+        handle.is_initialized = AsyncMock(return_value=True)
+        handle.wait_idle = AsyncMock()
+        handle.wait_expected_num_cells = AsyncMock()
+        handle.abort_update_weights = controller.abort_update_weights
+        handle.abort_all = controller.abort_all
+
+        await asyncio.wait_for(self._take_over(fake_components), timeout=1)
+        await asyncio.wait_for(controller.prepare_eval(), timeout=1)
+        assert not controller.context_lock.locked
 
     async def test_the_eval_fleet_reaches_the_executor_through_an_rpc_call(self, fake_components):
         """The controller is a worker: its fleet is only knowable by calling it, never by reading it."""
@@ -598,6 +645,12 @@ def _make_trainer_handle(
 
 class TestCreateTrainingModels:
     @staticmethod
+    def _handles(args: AllConfig) -> dict[str, MagicMock]:
+        return create_trainer_handles(
+            args, trainer_configs=args.raw_megatron.trainers, capability=FakeBackendCapability()
+        )
+
+    @staticmethod
     def _patched(monkeypatch, requested: list[str], *, initialized: bool = False) -> list[MagicMock]:
         handles: list[MagicMock] = []
 
@@ -625,10 +678,9 @@ class TestCreateTrainingModels:
         """A single entry --megatron-config names the pool '<model_id>-actor'; 'actor' addresses nothing."""
         requested: list[str] = []
         self._patched(monkeypatch, requested)
+        args = self._args(tmp_path)
 
-        await create_training_models(
-            self._args(tmp_path), self._rollout_executor(), capability=FakeBackendCapability()
-        )
+        await create_training_models(args, self._rollout_executor(), handles=self._handles(args))
 
         assert requested == ["alpha-actor"]
 
@@ -636,20 +688,18 @@ class TestCreateTrainingModels:
         """The take-over reads a trainer and then drives it, and a second handle would repeat the readiness handshake."""
         requested: list[str] = []
         handles = self._patched(monkeypatch, requested)
+        args = self._args(tmp_path)
 
-        await create_training_models(
-            self._args(tmp_path), self._rollout_executor(), capability=FakeBackendCapability()
-        )
+        await create_training_models(args, self._rollout_executor(), handles=self._handles(args))
 
         assert len(handles) == 1
 
     async def test_every_trainer_is_asked_what_it_is_before_anything_drives_it(self, tmp_path, monkeypatch):
         """Initializing a trainer a previous script already built would throw away the state it is holding."""
         handles = self._patched(monkeypatch, [])
+        args = self._args(tmp_path)
 
-        await create_training_models(
-            self._args(tmp_path), self._rollout_executor(), capability=FakeBackendCapability()
-        )
+        await create_training_models(args, self._rollout_executor(), handles=self._handles(args))
 
         [handle] = handles
         called = [name for name, _args, _kwargs in handle.mock_calls]
@@ -659,8 +709,9 @@ class TestCreateTrainingModels:
         """A freshly built run stands before rollout 0, so there is no rollout state for the executor to restore."""
         self._patched(monkeypatch, [], initialized=False)
         rollout_executor = self._rollout_executor()
+        args = self._args(tmp_path)
 
-        await create_training_models(self._args(tmp_path), rollout_executor, capability=FakeBackendCapability())
+        await create_training_models(args, rollout_executor, handles=self._handles(args))
 
         rollout_executor.load.assert_not_awaited()
 
@@ -683,7 +734,7 @@ class TestCreateTrainingModels:
             "alpha-actor=10.0.0.5:1234",
         )
 
-        await create_training_models(args, self._rollout_executor(), capability=FakeBackendCapability())
+        await create_training_models(args, self._rollout_executor(), handles=self._handles(args))
 
         [handle] = handles
         called = [name for name, _args, _kwargs in handle.mock_calls]
@@ -695,7 +746,7 @@ class TestCreateTrainingModels:
         self._patched(monkeypatch, requested)
         args = parse_megatron_test_config("--advantage-estimator", "ppo")
 
-        await create_training_models(args, self._rollout_executor(), capability=FakeBackendCapability())
+        await create_training_models(args, self._rollout_executor(), handles=self._handles(args))
 
         assert requested == ["actor", "critic"]
 
@@ -710,7 +761,7 @@ class TestCreateTrainingModels:
             await create_training_models(
                 parse_megatron_test_config("--megatron-config", megatron_config),
                 self._rollout_executor(),
-                capability=FakeBackendCapability(),
+                handles={},
             )
 
 

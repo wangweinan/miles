@@ -136,11 +136,6 @@ class TestTrainParallelConfigWiring:
         actor_handle = FakeActorHandle()
         rollout_executor = FakeRolloutExecutor()
         monkeypatch.setattr(placement_group, "compute_trainer_configs", lambda args: [trainer_config])
-        monkeypatch.setattr(
-            placement_group,
-            "create_trainer_handles",
-            lambda args, *, trainer_configs, capability: {trainer_config.trainer_id: actor_handle},
-        )
         monkeypatch.setattr(placement_group, "take_over_trainers", lambda args, *, handles: _return(False))
         monkeypatch.setattr(
             placement_group,
@@ -153,7 +148,7 @@ class TestTrainParallelConfigWiring:
         await placement_group.create_training_models(
             args,
             rollout_executor=rollout_executor,
-            capability=object(),
+            handles={trainer_config.trainer_id: actor_handle},
         )
 
         assert rollout_executor.received_config is train_parallel_config
