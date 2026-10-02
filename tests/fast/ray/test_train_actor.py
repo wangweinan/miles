@@ -192,6 +192,43 @@ class TestInitRunsExactlyOnce:
         assert (args.backend.rank, args.backend.world_size) == (3, 8)
         assert rebound == [args]
 
+    @pytest.mark.parametrize("indep_dp", [False, True])
+    @pytest.mark.parametrize("original_dump", [None, "1"])
+    def test_only_independent_trainers_ignore_cross_cell_dump_signals(
+        self, monkeypatch: pytest.MonkeyPatch, indep_dp: bool, original_dump: str | None
+    ) -> None:
+        """Recoverable cross-cell failures cannot terminate the default process group via a dump signal."""
+        run = parse_megatron_test_config(
+            "--use-dynamic-batch-size", "--max-tokens-per-gpu", "1024", *(["--indep-dp"] if indep_dp else [])
+        )
+        args = compute_trainer_config(run, compute_trainer_configs(run)[0])
+        actor = _ActorWithoutReloadSupport.__new__(_ActorWithoutReloadSupport)
+        actor._init_once = InitOnce("TrainRayActor")
+        actor._heartbeat = SimpleNamespace(bump=lambda: None)
+        observed: list[str | None] = []
+        if original_dump is None:
+            monkeypatch.delenv("TORCH_NCCL_DUMP_ON_TIMEOUT", raising=False)
+        else:
+            monkeypatch.setenv("TORCH_NCCL_DUMP_ON_TIMEOUT", original_dump)
+        monkeypatch.setattr(train_actor.torch.cuda, "set_device", lambda _device: None)
+        monkeypatch.setattr(
+            train_actor.dist,
+            "init_process_group",
+            lambda **_kwargs: observed.append(os.environ.get("TORCH_NCCL_DUMP_ON_TIMEOUT")),
+        )
+        monkeypatch.setattr(train_actor.dist, "get_rank", lambda: 0)
+        monkeypatch.setattr(train_actor.dist, "get_world_size", lambda: 2)
+        monkeypatch.setattr(
+            train_actor, "init_gloo_group", lambda: observed.append(os.environ.get("TORCH_NCCL_DUMP_ON_TIMEOUT"))
+        )
+        monkeypatch.setattr(train_actor, "rebind_env_reporting", lambda _args: None)
+        monkeypatch.setattr(train_actor.torch.version, "hip", "test")
+
+        actor._init_common(args=args, role="actor")
+
+        assert observed == ["0" if indep_dp else original_dump, original_dump]
+        assert os.environ.get("TORCH_NCCL_DUMP_ON_TIMEOUT") == original_dump
+
     def test_a_second_init_is_refused(self):
         """A worker that already initialized is a stale process; reusing it must fail loudly, not train on."""
         actor = _actor_with(_inited_guard())
