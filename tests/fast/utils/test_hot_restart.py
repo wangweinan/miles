@@ -72,8 +72,9 @@ class _FakeTrainer:
         self.init_requests.append(request)
         return [7]
 
-    async def load_state(self) -> list[Any]:
+    async def load_state(self, request: TrainerControllerInitRequest) -> list[Any]:
         self._record("load_state")
+        self.init_requests.append(request)
         await asyncio.sleep(self.load_seconds)
         return [3]
 
@@ -379,6 +380,7 @@ class TestTheTrainerStateIsRolledBack:
         assert await trainer_init_or_load_state(warm, _INIT_REQUEST, trainer_id=_TRAINER_ID, resumed=True) == [3]
         assert cold.calls == ["init"] and warm.calls == ["load_state"]
         assert cold.init_requests == [_INIT_REQUEST]
+        assert warm.init_requests == [_INIT_REQUEST]
 
     async def test_a_reload_that_never_returns_fails_loud(self, short_reload_budget: None):
         """A trainer wedged inside load_state would otherwise leave the run waiting on it forever."""

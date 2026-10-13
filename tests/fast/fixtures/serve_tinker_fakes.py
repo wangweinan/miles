@@ -7,6 +7,8 @@ import pytest
 import serve_tinker
 import uvicorn
 
+from tests.fast.fixtures.args_fixtures import ConfigNamespace
+
 from miles.ray.train.init_request import TrainerControllerInitRequest
 from miles.utils import http_utils
 from miles.utils.args.component_rollout import InferenceRuntimeImmutState, InferenceRuntimeMutState
@@ -17,9 +19,16 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Simpl
     controller = _InferenceController()
     trainer = _Trainer()
     requests: list[httpx.Request] = []
-    args = SimpleNamespace(
+    args = ConfigNamespace(
+        train_backend="megatron",
+        megatron_to_hf_mode="bridge",
+        ref_load=None,
+        no_load_optim=None,
+        no_load_rng=None,
+        finetune=None,
+        ckpt_step=None,
         multi_lora=True,
-        load="base-model",
+        load=None,
         hf_checkpoint="base-model",
         tinker_checkpoint_root="checkpoints",
         max_tokens_per_gpu=None,
@@ -50,7 +59,7 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Simpl
         tinker_server_port=10613,
     )
     hf_config = SimpleNamespace(max_position_embeddings=4096, vocab_size=128)
-    actor_config = SimpleNamespace(role=serve_tinker.ACTOR_ROLE, trainer_id="actor")
+    actor_config = SimpleNamespace(role=serve_tinker.ACTOR_ROLE, trainer_id="actor", overrides={}, model_id=None)
     monkeypatch.setattr(serve_tinker, "load_hf_config", lambda _: SimpleNamespace(get_text_config=lambda: hf_config))
     monkeypatch.setattr(serve_tinker.ArgvOrchestratorStartupInfo, "create", lambda _: object())
     monkeypatch.setattr(serve_tinker, "init_orchestration_script", lambda _, *, disposer: object())
@@ -60,7 +69,7 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Simpl
     monkeypatch.setattr(serve_tinker, "compute_trainer_configs", lambda _: [actor_config])
     monkeypatch.setattr(serve_tinker, "create_trainer_handles", lambda _, **kwargs: {"actor": trainer})
     monkeypatch.setattr(serve_tinker.uvicorn, "Server", _Server)
-    monkeypatch.setattr(http_utils, "_http_client", None)
+    monkeypatch.setattr(http_utils, "_http_clients", {})
     monkeypatch.setattr(http_utils, "_client_concurrency", 0)
     monkeypatch.setattr(http_utils, "_distributed_post_enabled", False)
 
@@ -77,8 +86,8 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Simpl
     try:
         yield SimpleNamespace(args=args, controller=controller, trainer=trainer, requests=requests)
     finally:
-        if http_utils._http_client is not None:
-            await http_utils._http_client.aclose()
+        for client in http_utils._http_clients.values():
+            await client.aclose()
 
 
 class _InferenceController:

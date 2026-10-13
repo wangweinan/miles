@@ -83,7 +83,7 @@ class TestLoadState:
             NotImplementedError,
             match="_ActorWithoutReloadSupport cannot reload its state without restarting",
         ):
-            actor.load_state()
+            actor.load_state(ckpt_load_config=None)
 
 
 class TestConfigureMasterAddrAndPort:
@@ -115,7 +115,8 @@ class TestTrainParallelConfigWiring:
     async def test_the_driver_passes_the_resolved_actor_config_to_the_rollout_executor(self, monkeypatch):
         """The driver resolves the actor config before handing it to the rollout executor."""
         train_parallel_config = make_train_parallel_config(dp_size=4)
-        trainer_config = SimpleNamespace(role="actor", trainer_id="actor")
+        args = parse_megatron_test_config()
+        [trainer_config] = compute_trainer_configs(args)
 
         class FakeActorHandle:
             async def get_train_parallel_config(self) -> TrainParallelConfig | None:
@@ -150,9 +151,7 @@ class TestTrainParallelConfigWiring:
         )
 
         await placement_group.create_training_models(
-            SimpleNamespace(
-                use_critic=False, start_rollout_id=None, num_rollout=1, wandb_run_id=None, mlflow_run_id=None
-            ),
+            args,
             rollout_executor=rollout_executor,
             capability=object(),
         )

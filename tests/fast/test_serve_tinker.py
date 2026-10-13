@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -20,8 +21,9 @@ class TestServe:
 
         await with_disposer(serve_tinker.serve, args)
 
+        assert tinker_startup.trainer.request.ckpt_load_config.load == "base-model"
+        assert not tinker_startup.trainer.request.ckpt_load_config.resume_from_ckpt
         assert args.inference_runtime_mut_state.engine_count == 2
-        assert http_utils._http_client is not None
         assert http_utils._client_concurrency == 24
         result = await MilesBackend(trainer=tinker_startup.trainer, router_url="http://router:30000").sample(
             payload={
@@ -34,6 +36,7 @@ class TestServe:
             lora_name=None,
         )
 
+        assert not http_utils._http_clients[asyncio.get_running_loop()].is_closed
         assert result == {"sequences": [{"tokens": [42], "logprobs": [-0.25], "stop_reason": "length"}]}
         [request] = tinker_startup.requests
         assert request.method == "POST"
@@ -50,7 +53,19 @@ class TestServe:
             await with_disposer(serve_tinker.serve, tinker_startup.args)
 
         assert tinker_startup.controller.disposed
-        assert http_utils._http_client is None
+        assert http_utils._http_clients == {}
+
+    async def test_different_resolved_trainer_base_is_rejected_before_startup(
+        self, tinker_startup: SimpleNamespace
+    ) -> None:
+        """A resolved trainer base differing from the engine base prevents gateway startup."""
+        tinker_startup.args.ref_load = "other-model"
+
+        with pytest.raises(AssertionError, match="same frozen HF base"):
+            await with_disposer(serve_tinker.serve, tinker_startup.args)
+
+        assert not tinker_startup.controller.initialized
+        assert tinker_startup.trainer.request is None
 
 
 class TestTrainerTokenBudget:

@@ -8,6 +8,7 @@ from tests.fast.fixtures.capability_fixtures import FakeBackendCapability
 from tests.fast.fixtures.megatron_config_fixtures import encode_megatron_config
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
+from miles.backends.megatron_utils import megatron_config
 from miles.backends.megatron_utils.megatron_config import resolve_megatron_config
 from miles.ray import placement_group as placement_group_module
 from miles.ray.placement_group import _assert_external_trainer_in_run, _get_placement_group_layout
@@ -356,7 +357,9 @@ async def test_a_critic_run_inits_one_controller_per_role(monkeypatch, tmp_path)
     )
 
     assert [handle.trainer_id for handle in handles] == ["actor", "critic"]
-    assert all(handle.inited_with == TrainerControllerInitRequest.from_args(args) for handle in handles)
+    assert [handle.inited_with for handle in handles] == [
+        TrainerControllerInitRequest.from_args(args, trainer=trainer) for trainer in args.raw_megatron.trainers
+    ]
 
 
 def test_the_critic_controller_payload_carries_neutralized_args(tmp_path):
@@ -381,13 +384,17 @@ def test_the_critic_controller_payload_carries_neutralized_args(tmp_path):
     )
 
 
-def test_the_critic_controller_payload_carries_the_critic_checkpoint_and_schedule(tmp_path):
+def test_the_critic_controller_payload_carries_the_critic_checkpoint_and_schedule(tmp_path, monkeypatch):
     """The worker no longer swaps critic_* onto the standard fields, so the args must arrive remapped."""
     args = _training_models_args(tmp_path)
 
     _actor_args, critic_args = TrainerControllerSpec.slice_configs(args)
     backend = critic_args.backend
-    assert (backend.load, backend.save, backend.lr, backend.lr_warmup_iters) == (
+    monkeypatch.setattr(megatron_config, "has_megatron_checkpoint", lambda path: path == "/ckpt/critic")
+    [critic] = [trainer for trainer in args.raw_megatron.trainers if trainer.role == "critic"]
+    request = TrainerControllerInitRequest.from_args(args, trainer=critic)
+    assert "load" not in vars(backend)
+    assert (request.ckpt_load_config.load, backend.save, backend.lr, backend.lr_warmup_iters) == (
         "/ckpt/critic",
         "/ckpt/run_critic",
         2e-6,

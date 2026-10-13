@@ -206,7 +206,9 @@ class TestCreatePolicyTrainers:
         trainers = await multi_policy_utils.create_trainers(args, rollout_executor=AsyncMock(), capability=_CAPABILITY)
 
         assert [entry["trainer_id"] for entry in created] == ["a-actor", "b-actor"]
-        assert [entry["request"] for entry in created] == [TrainerControllerInitRequest.from_args(args)] * 2
+        assert [entry["request"] for entry in created] == [
+            TrainerControllerInitRequest.from_args(args, trainer=trainer) for trainer in args.raw_megatron.trainers
+        ]
         assert [entry["requested_start_rollout_id"] for entry in created] == [args.start_rollout_id] * 2
         assert list(trainers) == ["a", "b"]
         assert [trainer.model_id for trainer in trainers.values()] == ["a", "b"]

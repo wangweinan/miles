@@ -1514,7 +1514,7 @@ class TestUpdateWeightsReachesTheWorker:
             ray.get(handle.set_update_weights_return_value.remote(_output(1)))
         assert _outcome_of(await group.update_weights(info=info)) == _outcome_of(_output(1))
 
-        await group.load_state()
+        await group.load_state(TrainerControllerInitRequest(num_rollout=None, wandb_run_id=None, mlflow_run_id=None))
         for handle in handles:
             ray.get(handle.set_update_weights_return_value.remote(_output(2)))
 
@@ -2059,7 +2059,7 @@ class TestWeightUpdateResultEvent:
             ray.get(handle.set_update_weights_return_value.remote(_output(1)))
         before = await group.update_weights(info=info)
 
-        await group.load_state()
+        await group.load_state(TrainerControllerInitRequest(num_rollout=None, wandb_run_id=None, mlflow_run_id=None))
         after = await group.update_weights(info=info)
 
         first, second = self._results(_event_log_dir)
@@ -2086,6 +2086,43 @@ class TestStepEndRecordsCellIncarnations:
         [event] = [e for e in read_events(tmp_path) if isinstance(e, TrainGroupStepEndEvent)]
         assert event.cell_incarnations == {"trainer-0": "hash-0", "trainer-2": "hash-2b"}
         assert event.cell_outcomes == {0: [TrainStepOutcome.NORMAL], 2: "error"}
+
+
+class TestRuntimeCheckpointRequests:
+    async def test_each_reload_forwards_its_request_without_retaining_checkpoint_state(self) -> None:
+        """Consecutive reloads deliver their own checkpoint options through every cell to each actor."""
+        from miles.backends.megatron_utils.checkpoint_request import MegatronCkptLoadConfig
+
+        group = await _make_alive_controller(num_cells=2)
+        cells = list(group._cells)
+        original_args = dict(vars(group.args))
+        configs = [
+            MegatronCkptLoadConfig(
+                load=path,
+                resume_from_ckpt=True,
+                no_load_optim=False,
+                no_load_rng=False,
+                finetune=False,
+                ckpt_step=step,
+            )
+            for path, step in [("/checkpoint/first", 3), ("/checkpoint/second", 9)]
+        ]
+
+        for config in configs:
+            await group.load_state(
+                TrainerControllerInitRequest(
+                    num_rollout=None, wandb_run_id=None, mlflow_run_id=None, ckpt_load_config=config
+                )
+            )
+
+        for cell in cells:
+            for handle in get_raw_actor_handles(cell):
+                calls = [call for call in ray.get(handle.get_calls.remote()) if call[0] == "load_state"]
+                assert [call[2]["ckpt_load_config"] for call in calls] == configs
+            assert not {"ckpt_load_config", "_ckpt_load_config"} & vars(cell).keys()
+            assert "ckpt_load_config" not in vars(cell.args)
+        assert vars(group.args) == original_args
+        assert not {"ckpt_load_config", "_ckpt_load_config"} & vars(group).keys()
 
 
 class TestIndependentDpInitialization:

@@ -963,5 +963,5 @@ class TestCreateTrainingModel:
         )
 
         assert info.start_rollout_id == 4
-        handle.load_state.assert_awaited_once_with()
+        handle.load_state.assert_awaited_once_with(_INIT_REQUEST)
         handle.init.assert_not_awaited()
