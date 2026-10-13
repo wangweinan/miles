@@ -245,7 +245,7 @@ class TestCreatePolicyTrainers:
             _make_trainer_args("a", "b"), rollout_executor=rollout_executor, capability=_CAPABILITY
         )
 
-        rollout_executor.load.assert_awaited_once_with(3, completed_rollout_ids={"a": 3, "b": 1})
+        rollout_executor.load.assert_awaited_once_with(3, load=None, completed_rollout_ids={"a": 3, "b": 1})
 
     async def test_a_lagging_leader_still_decides_where_the_executor_loads(self, monkeypatch):
         """Picking any other trainer would replay the global rollout data from a position the leader never stood at."""
@@ -256,7 +256,7 @@ class TestCreatePolicyTrainers:
             _make_trainer_args("a", "b"), rollout_executor=rollout_executor, capability=_CAPABILITY
         )
 
-        rollout_executor.load.assert_awaited_once_with(1, completed_rollout_ids={"a": 1, "b": 8})
+        rollout_executor.load.assert_awaited_once_with(1, load=None, completed_rollout_ids={"a": 1, "b": 8})
 
     async def test_a_taken_over_run_loads_the_executor_at_the_leaders_position(self, monkeypatch):
         """Every policy resumed from a checkpoint, so the shared dataset has to be asked for the same position."""
@@ -268,7 +268,7 @@ class TestCreatePolicyTrainers:
         )
 
         assert [entry["resumed"] for entry in created] == [True, True]
-        rollout_executor.load.assert_awaited_once_with(3, completed_rollout_ids={"a": 3, "b": 1})
+        rollout_executor.load.assert_awaited_once_with(3, load=None, completed_rollout_ids={"a": 3, "b": 1})
 
     async def test_a_fresh_run_leaves_the_executor_unloaded(self, monkeypatch):
         """Every policy starts before rollout 0, so there is no rollout state for the executor to restore."""
@@ -300,7 +300,7 @@ class TestCreatePolicyTrainers:
             _make_trainer_args("a", "b", load=str(tmp_path)), rollout_executor=rollout_executor, capability=_CAPABILITY
         )
 
-        rollout_executor.load.assert_awaited_once_with(3, completed_rollout_ids={"a": 3, "b": 3})
+        rollout_executor.load.assert_awaited_once_with(3, load=str(tmp_path), completed_rollout_ids={"a": 3, "b": 3})
 
     async def test_a_trainer_config_without_a_policy_model_id_is_refused(self, monkeypatch):
         """Every state this driver keys is keyed by model id, so an unnamed trainer has nowhere to live."""

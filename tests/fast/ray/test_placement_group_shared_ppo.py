@@ -210,8 +210,9 @@ class _RecordingRolloutExecutor:
         self.train_parallel_config = config
         self.train_parallel_config_model_id = trainer_model_id
 
-    async def load(self, rollout_id=None):
+    async def load(self, rollout_id: int, *, load: str | None) -> None:
         self.loaded_rollout_id = rollout_id
+        self.loaded_path = load
 
 
 def _patch_train_controller_handles(monkeypatch, *, restored: dict[str, list[int]] | None = None) -> list:
@@ -330,6 +331,7 @@ async def test_an_actor_and_a_critic_that_agree_set_the_start_rollout_id(monkeyp
 
     assert args.start_rollout_id == 5
     assert rollout_executor.loaded_rollout_id == 4
+    assert rollout_executor.loaded_path == args.load
 
 
 async def test_a_run_without_a_critic_takes_the_actor_position(monkeypatch, tmp_path):

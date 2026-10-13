@@ -47,7 +47,7 @@ class _Rollout:
     async def set_train_parallel_config(self, config: Any, *, trainer_model_id: str) -> None:
         pass
 
-    async def load(self, rollout_id: int) -> None:
+    async def load(self, rollout_id: int, *, load: str | None) -> None:
         self.restored_rollouts.append(rollout_id)
 
 
