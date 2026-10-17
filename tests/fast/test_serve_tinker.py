@@ -24,6 +24,7 @@ class TestServe:
         assert tinker_startup.trainer.request.ckpt_load_config.load == "base-model"
         assert not tinker_startup.trainer.request.ckpt_load_config.resume_from_ckpt
         assert args.inference_runtime_mut_state.engine_count == 2
+        assert not http_utils._http_clients
         assert http_utils._client_concurrency == 24
         result = await MilesBackend(trainer=tinker_startup.trainer, router_url="http://router:30000").sample(
             payload={
@@ -54,6 +55,7 @@ class TestServe:
 
         assert tinker_startup.controller.disposed
         assert http_utils._http_clients == {}
+        assert http_utils._client_concurrency == 0
 
     async def test_different_resolved_trainer_base_is_rejected_before_startup(
         self, tinker_startup: SimpleNamespace
