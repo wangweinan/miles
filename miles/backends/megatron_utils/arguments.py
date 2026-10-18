@@ -40,6 +40,15 @@ def set_default_megatron_args(args):
     # fp32, and 20260819 convert the default to TE gemm which is bf16 x bf16 -> fp32. Result show
     # the TE one increase log prob diff so manually set back
     args.moe_router_use_torch_mm = True
+    # always use varlen
+    args.variable_seq_lengths = True
+    if args.moe_token_dispatcher_type == "allgather":
+        logger.info(
+            "--moe-token-dispatcher-type allgather does not support variable sequence length, "
+            "please use alltoall dispatcher instead."
+        )
+        args.moe_token_dispatcher_type = "alltoall"
+
     # compatible for megatron
     if args.rope_type is None:
         args.rope_type = "yarn" if args.multi_latent_attention else "rope"

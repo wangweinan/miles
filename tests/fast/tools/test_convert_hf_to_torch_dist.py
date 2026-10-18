@@ -51,8 +51,12 @@ class TestConversionPipelineParallel:
 
 
 class TestConversionParser:
+    @pytest.mark.parametrize(
+        ("dispatcher", "expected_dispatcher"),
+        [("allgather", "alltoall"), ("alltoall", "alltoall"), ("flex", "flex")],
+    )
     def test_conversion_defaults_reach_backend_validation_and_model_config(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, dispatcher: str, expected_dispatcher: str
     ) -> None:
         """The real parser validates conversion topology and returns a usable model configuration."""
         monkeypatch.setenv("WORLD_SIZE", "4")
@@ -76,6 +80,8 @@ class TestConversionParser:
                 "3",
                 "--save-interval",
                 "7",
+                "--moe-token-dispatcher-type",
+                dispatcher,
             ],
         )
         original_argv = sys.argv
@@ -90,6 +96,8 @@ class TestConversionParser:
         assert args.backend.global_batch_size == 4
         assert args.backend.micro_batch_size == 1
         assert args.backend.save_interval == 1
+        assert args.backend.variable_seq_lengths is True
+        assert args.backend.moe_token_dispatcher_type == expected_dispatcher
         assert sys.argv is original_argv
 
 

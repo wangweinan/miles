@@ -37,6 +37,7 @@ def _args(**overrides):
         multi_lora_n_adapters=0,
         rope_type=None,
         multi_latent_attention=True,
+        moe_token_dispatcher_type="alltoall",
     )
     return Namespace(**(values | overrides))
 

@@ -316,15 +316,6 @@ def parse_args_and_get_parser(
         megatron_validate_args(args)
         validate_lora_args_after_megatron(args)
 
-        # always use varlen
-        args.variable_seq_lengths = True
-        if args.moe_token_dispatcher_type == "allgather":
-            logger.info(
-                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
-                "please use alltoall dispatcher instead."
-            )
-            args.moe_token_dispatcher_type = "alltoall"
-
         if args.pipeline_model_parallel_size == 1:
             assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, (
                 "decoder_first_pipeline_num_layers and decoder_last_pipeline_num_layers should be None when "
