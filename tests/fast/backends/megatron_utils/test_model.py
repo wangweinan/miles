@@ -1,5 +1,6 @@
 import logging
 from argparse import Namespace
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -166,6 +167,41 @@ class TestTrainOneStepStructuredLog:
             )
 
         assert "train op=train_step rollout=7 step=3 attempt=2 outcome=NORMAL valid_step=true" in caplog.messages
+
+
+class TestMtpGradientGate:
+    @pytest.mark.parametrize(
+        ("detach", "response_length", "checked"), [(True, 128, True), (False, 128, False), (True, 129, False)]
+    )
+    def test_non_mtp_gradients_are_checked_only_for_detached_truncated_training(
+        self, train_one_step_env: TrainOneStepEnv, detach: bool, response_length: int, checked: bool
+    ) -> None:
+        """The backend detach flag preserves the real gradient check and its truncation boundary."""
+        from miles.backends.megatron_utils.model import train_one_step
+
+        env = train_one_step_env
+        env.args = make_train_one_step_args(
+            ci_test=True, enable_mtp_training=True, mtp_detach_heads=detach, rollout_max_response_len=response_length
+        )
+        assert "mtp_detach_heads" not in vars(env.args)
+        parameter = torch.nn.Parameter(torch.ones(1))
+        parameter.grad = torch.ones(1)
+        env.model[0].register_parameter("non_mtp_weight", parameter)
+
+        with pytest.raises(AssertionError, match="Expected all non-MTP parameters") if checked else nullcontext():
+            train_one_step(
+                args=env.args,
+                rollout_id=7,
+                step_id=3,
+                data_iterator=env.data_iterator,
+                model=env.model,
+                optimizer=None,
+                opt_param_scheduler=None,
+                num_microbatches=1,
+                num_rollouts=1,
+                witness_info=None,
+                attempt=0,
+            )
 
 
 class TestTrainOneStepFaultHook:
