@@ -201,7 +201,7 @@ class TestDistributedOptimizerParameterState:
     def test_save_writes_each_distributed_optimizers_parameter_state(self, tmp_path, monkeypatch):
         calls = []
         monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [self._distributed(calls)])
-        args = Namespace(no_save_optim=False, megatron_to_hf_mode="bridge")
+        args = make_trainer_args(no_save_optim=False, megatron_to_hf_mode="bridge")
         publisher = SimpleNamespace(write_adapter=lambda *_args: None)
 
         save_lora_checkpoint(
@@ -219,7 +219,9 @@ class TestRestoreLoraAdapter:
 
     @staticmethod
     def _args(tmp_path, *, no_load_optim, mode="raw"):
-        return Namespace(lora_adapter_path=str(tmp_path), no_load_optim=no_load_optim, megatron_to_hf_mode=mode)
+        return make_trainer_args(
+            lora_adapter_path=str(tmp_path), no_load_optim=no_load_optim, megatron_to_hf_mode=mode
+        )
 
     @staticmethod
     def _optimizer(calls):

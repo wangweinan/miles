@@ -48,7 +48,6 @@ class _Run:
     def megatron_args(self) -> Namespace:
         args = Namespace(
             train_backend="megatron",
-            finetune=False,
             save=str(self.checkpoint_dir),
             load=str(self.checkpoint_dir),
             requested_load=str(self.checkpoint_dir),
@@ -56,7 +55,7 @@ class _Run:
             save_debug_event_data=str(self.events_dir),
             use_critic=False,
         )
-        args.raw_megatron = resolve_megatron_config(args, base_args={})
+        args.raw_megatron = resolve_megatron_config(args, base_args={"finetune": False})
         return args
 
     def train(self, *rollout_ids: int) -> None:

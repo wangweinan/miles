@@ -552,7 +552,7 @@ class TestOneDirectoryPerRolloutCheckpoint:
         assert set(_load_executor_state(tmp_path, rollout_id=4)) == {("verifier", 4)}
 
         restored = _make_executor(tmp_path, _CountingRolloutFn())
-        await restored.load(4, completed_rollout_ids={"solver": 4, "verifier": 4})
+        await restored.load(4, load=str(tmp_path), completed_rollout_ids={"solver": 4, "verifier": 4})
         assert restored._output_snapshotter.get(trainer_model_id="verifier", rollout_id=4) is None
 
     async def test_the_directory_appears_only_after_every_component_saved(
