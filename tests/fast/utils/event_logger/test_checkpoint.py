@@ -19,6 +19,7 @@ def _args(
     load: Path | None = None,
     requested_load: Path | None = None,
     megatron_config: str | None = None,
+    finetune: bool = False,
 ) -> Namespace:
     args = Namespace(
         save_debug_event_data=str(event_dir) if event_dir else None,
@@ -27,11 +28,10 @@ def _args(
         requested_load=str(one) if (one := requested_load or load) else None,
         megatron_config=megatron_config,
         train_backend="megatron",
-        finetune=False,
         enable_sample_ownership_checker=True,
         use_critic=False,
     )
-    args.raw_megatron = resolve_megatron_config(args, base_args={})
+    args.raw_megatron = resolve_megatron_config(args, base_args={"finetune": finetune})
     return args
 
 
@@ -104,6 +104,29 @@ def _assert_moved_aside(tmp_path: Path, events: Path, *, stale: str) -> None:
 
 
 class TestEveryRunStartsFromACleanEventDir:
+    @pytest.mark.parametrize("base_finetune,override_finetune", [(True, None), (False, True), (True, False)])
+    def test_restore_uses_leader_finetune_override(
+        self, tmp_path: Path, base_finetune: bool, override_finetune: bool | None
+    ) -> None:
+        """Leader backend settings decide whether checkpoint events belong to this run."""
+        ckpt = tmp_path / "ckpt"
+        events = tmp_path / "events"
+        events.mkdir()
+        (events / "main.jsonl").write_text("checkpoint\n")
+        args = _args(event_dir=events, load=ckpt, finetune=base_finetune)
+        if override_finetune is not None:
+            args.raw_megatron.trainers[0].overrides["finetune"] = override_finetune
+        _snapshot(args, ckpt=ckpt, iteration=3)
+        _write_tracker(ckpt, "3")
+        (events / "main.jsonl").write_text("stale\n")
+
+        event_logger_checkpoint.restore(args)
+
+        if override_finetune is False:
+            assert (events / "main.jsonl").read_text() == "checkpoint\n"
+        else:
+            _assert_moved_aside(tmp_path, events, stale="stale\n")
+
     def test_restore_moves_a_stale_dir_aside_when_not_resuming(self, tmp_path: Path) -> None:
         """A fresh --save run reusing a previous run's save dir must not append to its event log."""
         events = tmp_path / "events"
