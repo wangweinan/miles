@@ -437,6 +437,7 @@ def test_qwen3_5_vision_tower_never_sees_language_model_packing_kwargs(monkeypat
             in_channels=3,
             out_hidden_size=16,
             num_position_embeddings=16,
+            rope_parameters={"rope_type": "axial", "rope_theta": 10000.0},
         ),
         image_token_id=60,
         video_token_id=61,

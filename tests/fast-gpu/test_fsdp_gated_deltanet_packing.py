@@ -84,6 +84,7 @@ def _tiny_vision_language_model(linear_head_dim):
             in_channels=3,
             out_hidden_size=text_config["hidden_size"],
             num_position_embeddings=16,
+            rope_parameters={"rope_type": "axial", "rope_theta": 10000.0},
         ),
         image_token_id=_IMAGE_TOKEN,
         video_token_id=_VIDEO_TOKEN,

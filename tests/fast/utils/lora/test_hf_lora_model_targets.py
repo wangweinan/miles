@@ -92,6 +92,7 @@ def _small_config(model_type, overrides):
                 patch_size=2,
                 temporal_patch_size=1,
                 spatial_merge_size=1,
+                rope_parameters={"rope_type": "axial", "rope_theta": 10000.0},
             ),
         )
     return AutoConfig.for_model(model_type, **text)
