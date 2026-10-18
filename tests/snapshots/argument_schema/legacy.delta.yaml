@@ -1,0 +1,7 @@
+base: megatron
+base_sha256: cc1e7f7104464b9c71c52fe306bf11bf30387f8e4855809ad9b3341407c30e0b
+edits:
+- at: 17
+  delete: 1
+  insert: |
+    legacy: true

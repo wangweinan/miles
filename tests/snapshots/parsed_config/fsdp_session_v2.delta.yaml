@@ -1,0 +1,15 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 323
+  delete: 1
+  insert: |2
+        assignment_mode: min_load
+- at: 938
+  delete: 1
+  insert: |2
+      sglang_router_policy: manual
+- at: 1001
+  delete: 1
+  insert: |2
+      use_session_server: v2

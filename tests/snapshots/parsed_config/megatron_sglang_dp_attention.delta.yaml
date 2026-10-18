@@ -1,0 +1,23 @@
+base: megatron
+base_sha256: 2ebb6627b78c515fde8fa61f9e5a420260488ea2a627aaf9f5e42807ea60340c
+edits:
+- at: 1151
+  delete: 1
+  insert: |2
+      rollout_num_gpus_per_engine: 2
+- at: 1191
+  delete: 1
+  insert: |2
+        dp_aware: true
+- at: 1379
+  delete: 1
+  insert: |2
+          dp_size: 2
+- at: 1405
+  delete: 1
+  insert: |2
+          enable_dp_attention: true
+- at: 1756
+  delete: 1
+  insert: |2
+          tp_size: 2

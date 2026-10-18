@@ -1,0 +1,12 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 130
+  delete: 1
+  insert: |2
+      eval_max_context_len: 1024
+- at: 302
+  delete: 2
+  insert: |2
+      rollout_max_context_len: 1024
+      rollout_max_prompt_len: 1023

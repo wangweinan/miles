@@ -1,0 +1,12 @@
+base: megatron
+base_sha256: 2ebb6627b78c515fde8fa61f9e5a420260488ea2a627aaf9f5e42807ea60340c
+edits:
+- at: 128
+  delete: 1
+  insert: |2
+      eval_max_context_len: 1024
+- at: 1147
+  delete: 2
+  insert: |2
+      rollout_max_context_len: 1024
+      rollout_max_prompt_len: 1023

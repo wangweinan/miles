@@ -1,0 +1,11 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 560
+  delete: 1
+  insert: |2
+          enable_deterministic_inference: true
+- at: 972
+  delete: 1
+  insert: |2
+      true_on_policy_mode: true

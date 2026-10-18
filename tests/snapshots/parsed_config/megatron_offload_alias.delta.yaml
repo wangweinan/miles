@@ -1,0 +1,19 @@
+base: megatron
+base_sha256: 2ebb6627b78c515fde8fa61f9e5a420260488ea2a627aaf9f5e42807ea60340c
+edits:
+- at: 230
+  delete: 1
+  insert: |2
+      offload_rollout: true
+- at: 232
+  delete: 1
+  insert: |2
+      offload_train: true
+- at: 398
+  delete: 1
+  insert: |2
+          disable_grad_buffers_cpu_backup: true
+- at: 401
+  delete: 1
+  insert: |2
+          disable_param_buffers_cpu_backup: true

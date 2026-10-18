@@ -1,0 +1,23 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 306
+  delete: 1
+  insert: |2
+      rollout_num_gpus_per_engine: 2
+- at: 345
+  delete: 1
+  insert: |2
+        dp_aware: true
+- at: 535
+  delete: 1
+  insert: |2
+          dp_size: 2
+- at: 561
+  delete: 1
+  insert: |2
+          enable_dp_attention: true
+- at: 912
+  delete: 1
+  insert: |2
+          tp_size: 2

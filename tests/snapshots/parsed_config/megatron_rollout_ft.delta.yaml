@@ -1,0 +1,23 @@
+base: megatron
+base_sha256: 2ebb6627b78c515fde8fa61f9e5a420260488ea2a627aaf9f5e42807ea60340c
+edits:
+- at: 10
+  delete: 1
+  insert: |2
+      api_server_port: 18080
+- at: 148
+  delete: 1
+  insert: |2
+      ft_components: [rollout]
+- at: 205
+  delete: 1
+  insert: |2
+      mini_ft_controller_enable: true
+- at: 1823
+  delete: 1
+  insert: |2
+      update_weight_transfer_mode: p2p
+- at: 1830
+  delete: 1
+  insert: |2
+      use_fault_tolerance: true

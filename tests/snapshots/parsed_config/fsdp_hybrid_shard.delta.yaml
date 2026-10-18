@@ -1,0 +1,15 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 2
+  delete: 1
+  insert: |2
+      actor_num_gpus_per_node: 4
+- at: 266
+  delete: 1
+  insert: |2
+        dp_replicate_size: 2, finetune: true, fp16: false, fsdp_cpu_backend: gloo, fsdp_cpu_offload: false, fsdp_state_dict_cpu_offload: true,
+- at: 273
+  delete: 1
+  insert: |2
+        weight_decay: 0.0, world_size: 4}

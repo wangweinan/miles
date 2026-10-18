@@ -1,0 +1,20 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 59
+  delete: 1
+  insert: |2
+      critic_save: $FIXTURES/save_critic
+- at: 175
+  delete: 1
+  insert: |2
+      log_inference_engine_weight_checksums: true
+- at: 413
+  delete: 2
+  insert: |2
+      save: $FIXTURES/save
+      save_debug_event_data: $FIXTURES/save/events
+- at: 419
+  delete: 1
+  insert: |2
+      save_interval: 2

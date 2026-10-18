@@ -1,0 +1,11 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 87
+  delete: 1
+  insert: |2
+      debug_disable_optimizer: true
+- at: 270
+  delete: 1
+  insert: |2
+        mtp_loss_scaling_factor: 0.2, mtp_num_layers: null, no_load_optim: true, no_load_rng: true, no_save_optim: true, optimizer: adam,

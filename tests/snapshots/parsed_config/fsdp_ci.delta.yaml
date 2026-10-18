@@ -1,0 +1,27 @@
+base: fsdp
+base_sha256: 6d30240fd179e567d09cba33e5fe238934a1fa4dee08b6bc7ac20f0b4d96939c
+edits:
+- at: 21
+  delete: 1
+  insert: |2
+      check_weight_transfer_checksum: true
+- at: 23
+  delete: 1
+  insert: |2
+      check_weight_update_equal: true
+- at: 46
+  delete: 1
+  insert: |2
+      ci_test: true
+- at: 175
+  delete: 1
+  insert: |2
+      log_inference_engine_weight_checksums: true
+- at: 412
+  delete: 1
+  insert: |2
+      sample_ownership_grace_steps: 2
+- at: 414
+  delete: 1
+  insert: |2
+      save_debug_event_data: $FIXTURES/events
