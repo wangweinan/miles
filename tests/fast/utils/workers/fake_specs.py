@@ -1,8 +1,16 @@
 from collections.abc import Callable
 from typing import Any, ClassVar, Self
+
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.args.runtime_base import BaseLeafConfig
-from miles.utils.workers.worker_spec import BaseCommandSpec, BaseServeSpec, LaunchCommandContext, SchedulingSpec, WorkerCtorContext, WorkerLaunchContext
+from miles.utils.workers.worker_spec import (
+    BaseCommandSpec,
+    BaseServeSpec,
+    LaunchCommandContext,
+    SchedulingSpec,
+    WorkerCtorContext,
+    WorkerLaunchContext,
+)
 
 
 def _no_env_vars(_ctx: WorkerLaunchContext) -> dict[str, str]:
@@ -21,7 +29,7 @@ class FakeCommandSpec(BaseCommandSpec):
 
     @classmethod
     def create(cls, config: Any) -> Self:
-        raise NotImplementedError(f'{cls.__name__} is built directly by the test that uses it')
+        raise NotImplementedError(f"{cls.__name__} is built directly by the test that uses it")
 
     def scheduling(self, scaling: ScalingConfig) -> SchedulingSpec:
         return self.fixed_scheduling
@@ -34,7 +42,7 @@ class FakeCommandSpec(BaseCommandSpec):
 
 
 class FakeServeSpec(BaseServeSpec):
-    worker_type: ClassVar[str] = 'fake'
+    worker_type: ClassVar[str] = "fake"
     config_class: ClassVar[type[BaseLeafConfig]] = BaseLeafConfig
     args: Any = None
     fixed_scheduling: SchedulingSpec
@@ -43,7 +51,7 @@ class FakeServeSpec(BaseServeSpec):
 
     @classmethod
     def create(cls, config: Any) -> Self:
-        raise NotImplementedError(f'{cls.__name__} is built directly by the test that uses it')
+        raise NotImplementedError(f"{cls.__name__} is built directly by the test that uses it")
 
     def scheduling(self, scaling: ScalingConfig) -> SchedulingSpec:
         return self.fixed_scheduling

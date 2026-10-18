@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 from tests.fast.utils.env_report.conftest import make_args
 
 from miles.utils.tracking_utils import wandb_utils
@@ -63,7 +64,7 @@ def _args(**overrides):
     values = {
         "env_report": None,
         "rank": 0,
-        "sglang_enable_metrics": False,
+        "sglang": make_sglang_config(enable_metrics=False),
         "use_wandb": True,
         "wandb_dir": None,
         "wandb_group": "group",
@@ -129,17 +130,18 @@ def test_secondary_wandb_init_attaches_without_resuming(monkeypatch):
 
 
 class TestPrimaryTrackingIdentity:
-
     def test_randomized_primary_name_does_not_require_a_worker_rank(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The launcher identifies primary tracking as rank zero without carrying worker rank fields."""
         args = _args(wandb_random_suffix=True)
         del args.rank
         init_calls: list[dict[str, object]] = []
-        monkeypatch.setattr(wandb_utils, 'generate_id', lambda: 'suffix')
-        monkeypatch.setattr(wandb_utils.wandb, 'init', lambda **kwargs: init_calls.append(kwargs))
-        monkeypatch.setattr(wandb_utils.wandb, 'define_metric', lambda *args, **kwargs: None)
-        monkeypatch.setattr(wandb_utils.wandb, 'run', SimpleNamespace(id='assigned'), raising=False)
+        monkeypatch.setattr(wandb_utils, "generate_id", lambda: "suffix")
+        monkeypatch.setattr(wandb_utils.wandb, "init", lambda **kwargs: init_calls.append(kwargs))
+        monkeypatch.setattr(wandb_utils.wandb, "define_metric", lambda *args, **kwargs: None)
+        monkeypatch.setattr(wandb_utils.wandb, "run", SimpleNamespace(id="assigned"), raising=False)
+
         wandb_utils.init_wandb_primary(args)
-        assert init_calls[0]['name'] == 'group_suffix-RANK_0'
-        assert init_calls[0]['group'] == 'group_suffix'
-        assert args.wandb_run_id == 'assigned'
+
+        assert init_calls[0]["name"] == "group_suffix-RANK_0"
+        assert init_calls[0]["group"] == "group_suffix"
+        assert args.wandb_run_id == "assigned"
