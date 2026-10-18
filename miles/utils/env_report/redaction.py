@@ -97,10 +97,22 @@ def _argv_value_redactors() -> dict[str, Callable[[str], str]]:
         return f"--{name.replace('_', '-')}"
 
     return {
+        "--config": _redact_config_json,
         **{flag(name): _redact for name in _SECRET_ARG_NAMES},
         **{flag(name): _redact_env_var_json for name in _ENV_VAR_ARG_NAMES},
         **{flag(name): _redact_url_userinfo for name in _URL_ARG_NAMES},
     }
+
+
+def _redact_config_json(value: str) -> str:
+    try:
+        config = json.loads(value)
+    except json.JSONDecodeError:
+        return _redact(value)
+    if not isinstance(config, dict):
+        return _redact(value)
+
+    return json.dumps(redact_config_values(config))
 
 
 def _redact_url_userinfo(value: str) -> str:
