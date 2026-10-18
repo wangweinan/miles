@@ -1,3 +1,5 @@
+import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,36 +13,37 @@ from tests.fast.fixtures.inkling_provider_fixtures import (
     inkling_reload_env,
 )
 
+from miles.backends.megatron_utils.lora.native.modules.lm_head import LoRAOutputHead
 from miles.utils.args.custom_function import CustomFunctionConfig
-from miles_plugins.models.inkling.lora import InklingLoRAAdapter
 
 _ = inkling_adapter_model, inkling_provider_env, inkling_reload_env
 
 
 class TestNativeInklingSetup:
+    @pytest.mark.parametrize(
+        "provider_path", ["miles_plugins.models.inkling.model.inkling_model_provider", "models.other.provider"]
+    )
     def test_typed_provider_injects_trainable_adapters_before_model_wrapping(
-        self, inkling_provider_env: SimpleNamespace
+        self, inkling_provider_env: SimpleNamespace, provider_path: str
     ) -> None:
         """A typed Inkling provider still selects real native LoRA injection."""
         env = inkling_provider_env
-        [model], optimizer, scheduler = env.module.setup_model_and_optimizer(env.args, role="actor")
+        args = replace_config_values(env.args, custom_model_provider_path=CustomFunctionConfig(path=provider_path))
+        [model], optimizer, scheduler = env.module.setup_model_and_optimizer(args, role="actor")
 
-        assert isinstance(model.lora_lm_head_adapter, InklingLoRAAdapter)
+        assert isinstance(model.lora_lm_head_adapter, LoRAOutputHead)
         assert model.lora_lm_head_adapter.head_A.requires_grad
         assert model.lora_lm_head_adapter.head_B.requires_grad
         assert not model.output_layer.weight.requires_grad
         assert optimizer is None and scheduler is None
 
-    @pytest.mark.parametrize("provider", [None, CustomFunctionConfig(path="models.other.provider")])
-    def test_other_providers_still_reject_unsupported_native_lora(
-        self, inkling_provider_env: SimpleNamespace, provider: CustomFunctionConfig | None
-    ) -> None:
-        """The typed-provider fix does not accept unsupported native LoRA models."""
+    def test_unregistered_architecture_rejects_native_lora(self, inkling_provider_env: SimpleNamespace) -> None:
+        """Unknown checkpoint architectures fail before an adapter can be attached."""
         env = inkling_provider_env
-        args = replace_config_values(env.args, custom_model_provider_path=provider)
+        (Path(env.args.hf_checkpoint) / "config.json").write_text(json.dumps({"model_type": "unsupported"}))
 
-        with pytest.raises(AssertionError, match="Native LoRA injection is only implemented"):
-            env.module.setup_model_and_optimizer(args, role="actor")
+        with pytest.raises(AssertionError, match="no spec registered"):
+            env.module.setup_model_and_optimizer(env.args, role="actor")
 
     @pytest.mark.parametrize("inkling", [True, False])
     def test_only_inkling_disables_muon_qkv_splitting(
@@ -60,15 +63,13 @@ class TestNativeInklingSetup:
 
 
 class TestNativeInklingReload:
-    @pytest.mark.parametrize("native_optimizer_restored", [False, True])
-    def test_disk_adapter_reloads_only_when_native_optimizer_was_not_restored(
-        self, inkling_reload_env: SimpleNamespace, tmp_path: Path, native_optimizer_restored: bool
+    @pytest.mark.parametrize("no_load_optim", [False, True])
+    def test_hf_adapter_requires_explicit_fresh_optimizer(
+        self, inkling_reload_env: SimpleNamespace, tmp_path: Path, no_load_optim: bool
     ) -> None:
-        """Typed Inkling reloads adapter tensors and masters without overwriting native optimizer restores."""
+        """HF adapters restore weights and refresh masters only with an explicit fresh optimizer."""
         env = inkling_reload_env
-        env.native_optimizer_restored = native_optimizer_restored
         adapter = env.model.lora_lm_head_adapter
-        initial = adapter.head_B.detach().clone()
         save_file(
             {
                 "language_model.lm_head.lora_A.weight": torch.full_like(adapter.head_A, 3),
@@ -76,20 +77,22 @@ class TestNativeInklingReload:
             },
             str(tmp_path / "adapter_model.safetensors"),
         )
-        args = replace_config_values(env.args, lora_adapter_path=str(tmp_path))
+        args = replace_config_values(env.args, lora_adapter_path=str(tmp_path), no_load_optim=no_load_optim)
 
-        env.module.load_model_state(
-            args,
-            model=[env.model],
-            optimizer=env.optimizer,
-            opt_param_scheduler=None,
-            role="actor",
-            checkpointing_context=None,
-        )
+        expectation = nullcontext() if no_load_optim else pytest.raises(AssertionError, match="no optimizer state")
+        with expectation:
+            env.module.load_model_state(
+                args,
+                model=[env.model],
+                optimizer=env.optimizer,
+                opt_param_scheduler=None,
+                role="actor",
+                checkpointing_context=None,
+            )
 
-        if native_optimizer_restored:
-            torch.testing.assert_close(adapter.head_B, initial)
-            assert env.optimizer.masters == {}
-        else:
-            torch.testing.assert_close(adapter.head_B, torch.full_like(adapter.head_B, 7))
+        torch.testing.assert_close(adapter.head_A, torch.full_like(adapter.head_A, 3))
+        torch.testing.assert_close(adapter.head_B, torch.full_like(adapter.head_B, 7))
+        if no_load_optim:
             torch.testing.assert_close(env.optimizer.masters["lora_lm_head_adapter.head_B"], adapter.head_B)
+        else:
+            assert env.optimizer.masters == {}

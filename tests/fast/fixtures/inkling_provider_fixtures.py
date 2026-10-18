@@ -1,8 +1,7 @@
 import json
-import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,16 +19,8 @@ def inkling_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
 
     from miles.backends.megatron_utils import model
     from miles.backends.training_utils import parallel
-    from miles_plugins.models.inkling import lora
 
-    layers = ModuleType("miles_plugins.models.inkling.layers")
-    layers.__dict__.update(
-        {
-            name: type(name, (_UnusedInklingLayer,), {})
-            for name in ("InklingDenseMLP", "InklingSelfAttention", "InklingSharedExperts")
-        }
-    )
-    monkeypatch.setitem(sys.modules, layers.__name__, layers)
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "inkling_text"}))
 
     provider_path = "miles_plugins.models.inkling.model.inkling_model_provider"
     args = make_trainer_config(
@@ -38,6 +29,7 @@ def inkling_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
         megatron_to_hf_mode="raw",
         hf_checkpoint=str(tmp_path),
         load=None,
+        no_load_optim=True,
         pretrained_checkpoint=str(tmp_path),
         moe_use_upcycling=False,
         lora_rank=2,
@@ -58,9 +50,7 @@ def inkling_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     rank = SimpleNamespace(rank=0)
-    monkeypatch.setattr(
-        parallel, "get_parallel_state", lambda: SimpleNamespace(pp=rank, tp=rank, cp=rank, intra_dp=rank)
-    )
+    monkeypatch.setattr(parallel, "_parallel_state", SimpleNamespace(pp=rank, tp=rank, cp=rank, intra_dp=rank))
     monkeypatch.setattr(model, "get_model", _build_local_model)
     monkeypatch.setattr(model, "is_first_replica_megatron_main_rank", lambda: True)
     monkeypatch.setattr(
@@ -70,7 +60,6 @@ def inkling_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
     monkeypatch.setattr(model, "check_peak_gpu_memory_after_load", lambda args: None)
     monkeypatch.setattr(model, "clear_memory", lambda: None)
     monkeypatch.setattr(model, "check_model_hashes", lambda args, model, iteration: None)
-    monkeypatch.setattr(lora, "_UNPADDED_VOCAB_CACHE", [None])
 
     with (
         function_registry.temporary(provider_path, _tiny_provider),
@@ -81,10 +70,10 @@ def inkling_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
 
 @pytest.fixture
 def inkling_adapter_model(inkling_provider_env: SimpleNamespace) -> torch.nn.Module:
-    from miles_plugins.models.inkling import lora
+    from miles.backends.megatron_utils.lora.native.lora import apply_native_lora
 
     model = _TinyInklingModel()
-    lora._apply_lm_head_lora(model, inkling_provider_env.args, scale=2, dropout=0, a_init="xavier")
+    apply_native_lora(model, inkling_provider_env.args)
     return model
 
 
@@ -112,24 +101,19 @@ def inkling_reload_env(
         module=inkling_provider_env.module,
         model=inkling_adapter_model,
         optimizer=_OptimizerMasters(inkling_adapter_model),
-        native_optimizer_restored=False,
     )
-    monkeypatch.setattr(
-        env.module, "load_checkpoint", lambda *args, **kwargs: (0, False, env.native_optimizer_restored)
-    )
+    monkeypatch.setattr(env.module, "load_checkpoint", lambda *args, **kwargs: (0, False))
     return env
-
-
-class _UnusedInklingLayer(torch.nn.Module):
-    def __init__(self) -> None:
-        raise AssertionError("The tiny Inkling fixture has no decoder layers")
 
 
 class _TinyInklingModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(
-            hidden_size=2, sequence_parallel=False, inkling=SimpleNamespace(logits_mup_width_multiplier=None)
+            hidden_size=2,
+            sequence_parallel=False,
+            gated_linear_unit=True,
+            inkling=SimpleNamespace(logits_mup_width_multiplier=None),
         )
         self.decoder = SimpleNamespace(layers=[])
         self.output_layer = torch.nn.Linear(2, 3, bias=False)
