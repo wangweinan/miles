@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from tests.fast.backends.training_utils.loss.loss_test_utils import (
+    args_to_dict,
     make_args,
     make_batch,
     make_inputs,
@@ -224,7 +225,7 @@ def _allgather_cp2_worker(rank: int, world_size: int, port: int, prompt_lens, re
 
         outputs = {}
         for backend in ("torch", "fused"):
-            args = make_args(**{**vars(base), "log_probs_backend": backend})
+            args = make_args(**{**args_to_dict(base), "log_probs_backend": backend})
             res = get_log_probs_and_entropy(
                 local.clone().requires_grad_(True) * 1,
                 args=args,
