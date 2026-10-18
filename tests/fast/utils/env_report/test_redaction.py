@@ -194,7 +194,7 @@ class TestNormalizedRouterSecrets:
 
 
 class TestSerializedConfigSecrets:
-    @pytest.mark.parametrize("flag", ["--config", "--orchestrator-config"])
+    @pytest.mark.parametrize("flag", ["--config", "--config-json", "--orchestrator-config"])
     @pytest.mark.parametrize("inline", [False, True])
     def test_every_config_entrypoint_redacts_nested_secrets_and_preserves_safe_values(
         self, flag: str, inline: bool
@@ -218,3 +218,10 @@ class TestSerializedConfigSecrets:
         assert restored["lr"] == 0.25
         assert result[-2:] == ["--lr", "0.5"]
         assert "wandb-secret" in payload
+
+    @pytest.mark.parametrize("payload", ['{"secret":', '["secret"]', '"secret"', "null"])
+    def test_uninspectable_config_payloads_are_redacted_wholesale(self, payload: str) -> None:
+        """Malformed or non-object configuration payloads cannot leak through the audit command line."""
+        result = redact_argv(["--config-json", payload])
+
+        assert result == ["--config-json", _redact(payload)]
