@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from tests.fast.fixtures.megatron_config_fixtures import encode_megatron_config, write_megatron_config_trainers
 
@@ -34,6 +35,7 @@ from miles.utils.arguments import (
     _validate_rematerialize_param_from_master_weight,
     get_miles_extra_args_provider,
     miles_validate_args,
+    parse_args_and_get_parser,
     resolve_rollout_function_paths,
     supports_partial_target_weight_update,
     validate_async_off_policy_correction,
@@ -3783,3 +3785,37 @@ def test_dumper_retention_override_is_only_added_for_megatron(backend: str) -> N
     assert ("save_retain_interval" in vars(args)) is (backend == "megatron")
     if backend == "megatron":
         assert args.save_retain_interval is None
+
+
+@pytest.mark.parametrize("backend", ["fsdp", "torchtitan"])
+@pytest.mark.parametrize("detach_heads", [True, False])
+def test_native_backends_own_the_mtp_detach_heads_argument(
+    monkeypatch: pytest.MonkeyPatch, backend: str, detach_heads: bool
+) -> None:
+    """Native backend parsing preserves the MTP option without an unowned argument error."""
+    monkeypatch.setattr(torch, "__version__", "2.13.0")
+    argv = [
+        "test",
+        "--train-backend",
+        backend,
+        "--rollout-batch-size",
+        "2",
+        "--num-rollout",
+        "1",
+        "--actor-num-gpus-per-node",
+        "1",
+        "--micro-batch-size",
+        "1",
+        "--rollout-max-response-len",
+        "1024",
+    ]
+    if not detach_heads:
+        argv.append("--no-mtp-detach-heads")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    args, _ = parse_args_and_get_parser()
+
+    native_args = args.raw_fsdp if backend == "fsdp" else args.raw_torchtitan
+    assert native_args is not None
+    assert native_args.mtp_detach_heads is detach_heads
+    assert "mtp_detach_heads" not in args.model_fields

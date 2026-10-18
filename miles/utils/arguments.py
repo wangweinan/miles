@@ -352,6 +352,7 @@ def parse_args_and_get_parser(
                 "disable_param_buffers_cpu_backup",
                 "finetune",
                 "load",
+                "mtp_detach_heads",
                 "mtp_loss_scaling_factor",
                 "mtp_num_layers",
                 "no_load_optim",
