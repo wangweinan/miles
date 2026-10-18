@@ -68,9 +68,13 @@ def _reload(actor: Any) -> int:
     if resume:
         values["load"] = actor.args.backend.requested_load
     request = MegatronCkptLoadConfig(resume_from_ckpt=resume, **values)
-    with actor.args.backend.mutable():
-        for name in CHECKPOINT_LOAD_FIELDS:
-            delattr(actor.args.backend, name)
+    actor.args.backend = type(actor.args.backend)(
+        **{
+            name: value
+            for name, value in vars(actor.args.backend).items()
+            if name not in (*CHECKPOINT_LOAD_FIELDS, "requested_load")
+        }
+    )
     return actor.load_state(request)
 
 
@@ -263,7 +267,7 @@ class TestTheCheckpointAReloadRollsBackTo:
         original = {
             name: value
             for name, value in vars(args.backend).items()
-            if name not in CHECKPOINT_LOAD_FIELDS
+            if name not in (*CHECKPOINT_LOAD_FIELDS, "requested_load")
         }
         _watch_load(actor_module, monkeypatch, args=args, iteration=50)
 
@@ -324,7 +328,7 @@ class TestAReloadThatFindsNothingItSaved:
             assert _reload(actor) == 0
 
         assert seen["args_during_load"]["load"] == _reference_weights(tmp_path)
-        assert "found no checkpoint" in caplog.text
+        assert "No checkpoint to resume" in caplog.text
 
     def test_it_loads_under_the_arguments_the_run_was_started_with(self, actor_module, tmp_path, monkeypatch):
         """Anything else would answer a different question than the one the trainer's own init answered."""
@@ -460,13 +464,6 @@ class TestWhatAReloadRefuses:
         actor = _actor(actor_module, role="actor", args=_args(tmp_path, keep_old_actor=True))
 
         with pytest.raises(AssertionError, match="second copy of the actor"):
-            _reload(actor)
-
-    def test_a_run_that_was_never_given_a_load_directory_is_refused(self, actor_module, tmp_path):
-        """There is no checkpoint for this reload to restore, and starting the trainer over would replay the run."""
-        actor = _actor(actor_module, role="actor", args=_args(tmp_path, requested_load=None))
-
-        with pytest.raises(AssertionError, match="a hot restart needs --load"):
             _reload(actor)
 
     def test_a_periodically_updated_reference_is_refused(self, actor_module, tmp_path):

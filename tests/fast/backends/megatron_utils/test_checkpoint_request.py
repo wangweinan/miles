@@ -101,7 +101,7 @@ class TestCheckpointLoadScope:
         assert vars(args) == original
 
     @pytest.mark.parametrize(
-        "field", ["load", "finetune", "no_load_optim", "no_load_rng", "ckpt_step"]
+        "field", ["load", "finetune", "no_load_optim", "no_load_rng", "ckpt_step", "requested_load"]
     )
     def test_preexisting_runtime_fields_are_rejected_without_mutation(self, field: str) -> None:
         """A loading request must not overwrite fields leaked from an earlier call."""
@@ -128,3 +128,13 @@ class TestCheckpointLoadScope:
             assert args.ckpt_step == 22
 
         assert vars(args) == original
+
+    def test_requested_load_leaked_by_loader_is_rejected_on_exit(self) -> None:
+        """A loader cannot silently introduce a second checkpoint source into the shared backend."""
+        args = MegatronArgsNamespace()
+
+        with pytest.raises(AssertionError, match="requested_load belongs to the orchestrator"):
+            with MegatronCkptLoadConfig.for_peer_recovery().apply(args):
+                vars(args)["requested_load"] = "unexpected"
+
+        assert not {"load", "finetune", "no_load_optim", "no_load_rng", "ckpt_step"} & vars(args).keys()
