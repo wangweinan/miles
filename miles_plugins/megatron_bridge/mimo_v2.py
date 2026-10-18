@@ -40,6 +40,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer import ModuleSpec
 from megatron.core.transformer.attention import SelfAttention
 
+
 logger = logging.getLogger(__name__)
 
 
