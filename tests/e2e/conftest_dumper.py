@@ -125,8 +125,8 @@ patches:
           hidden_states = self.attn_boundary.prepare(
               hidden_states,
               forward_batch,
-              capture_gathered=captured_last_layer_outputs,
-              capture=capture_output,
+              captured_last_layer_outputs=captured_last_layer_outputs,
+              capture_output=capture_output,
               **kwargs,
           )
         append: "dumper.dump('layer_input', forward_batch.residual_stream.residual, dims='t h # tp:replicated dp:=attn_dp')"
@@ -149,7 +149,7 @@ patches:
           # output contract names the group it is owed over, None when complete.
           mlp_output_dims = (
               't h[tp:partial]'
-              if self.ffn_boundary.plan.path_for(forward_batch).output.group is not None
+              if self.ffn_boundary.plan.produced(forward_batch).group is not None
               else 't h # tp:replicated'
           )
           dumper.dump('mlp_output', hidden_states, dims=mlp_output_dims)
