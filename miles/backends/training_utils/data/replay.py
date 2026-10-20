@@ -1,20 +1,24 @@
-"""Trainer side of the replay data: rebuild R3 and indexer top-k, and derive the sampling-mask columns.
+"""Trainer side of the replay data: read output store objects, rebuild R3 and indexer top-k, and
+derive the sampling-mask columns.
 
 Runs once per train attempt on this rank's DP shard, after the shard is selected
 (``process_rollout_data``), and writes the train dict columns training consumes today:
 ``rollout_routed_experts``, ``rollout_indexer_topk``, ``rollout_sampling_mask_ids`` /
 ``rollout_sampling_mask_offsets`` and, in support mode, ``rollout_topk_*``. ``rollout_log_probs``
 comes from the rollout, which reads the sampled tokens' log-probs from the responses.
-The inputs are only this shard's samples, so a retry with another DP size derives again from scratch.
+Inline and store data take the same path; the inputs are only this shard's samples, so a retry
+with another DP size reads again from scratch.
 """
 
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 
+from miles.utils.output_store_config import get_output_store_reader, output_store_read_buffer_bytes
 from miles.utils.replay_index import (
     INDEXER_TOPK,
     ROUTED_EXPERTS,
@@ -26,6 +30,8 @@ from miles.utils.replay_index import (
 )
 from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs
 
+logger = logging.getLogger(__name__)
+
 _ROWS_COLUMNS = ((ROUTED_EXPERTS, "rollout_routed_experts"), (INDEXER_TOPK, "rollout_indexer_topk"))
 
 
@@ -34,14 +40,19 @@ def materialize_replay_columns(args: Any, rollout_data: dict[str, Any]) -> None:
     indexes = pop_train_columns(rollout_data)
     if indexes is None:
         return
-    # Inline rows only: no segment needs arrays read from elsewhere.
-    fetched: dict[tuple[str, str], np.ndarray] = {}
+    fetched = read_store_objects(indexes, buffer_bytes=_read_buffer_bytes(args, indexes))
     for name, column in _ROWS_COLUMNS:
         fields = _complete_field(indexes, name)
         if fields is not None:
             rollout_data[column] = [_materialize_rows(field, fetched) for field in fields]
     if (masks := _complete_field(indexes, "sampling_mask")) is not None:
         _write_sampling_mask_columns(args, rollout_data, [mask.mask_pieces(fetched) for mask in masks])
+
+
+def _read_buffer_bytes(args: Any, indexes: Sequence[ReplayIndex]) -> int:
+    if not any(index.store_refs() for index in indexes):
+        return 0
+    return output_store_read_buffer_bytes(args)
 
 
 def _complete_field(indexes: Sequence[ReplayIndex], name: str) -> list[ReplaySegments] | None:
@@ -62,6 +73,80 @@ def _materialize_rows(field: ReplaySegments, fetched: Mapping[tuple[str, str], n
             "(topk-bypassing --moe-runner-backend such as flashinfer_trtllm?)."
         )
     return rows
+
+
+# ============================== store reads ==============================
+
+
+def read_store_objects(indexes: Sequence[ReplayIndex], *, buffer_bytes: int) -> dict[tuple[str, str], np.ndarray]:
+    """Read every stored field the shard uses once, in chunks that fit the read buffer.
+
+    Each chunk is copied into arrays this process owns before the next one is read, so the
+    client's buffer only ever holds one chunk.
+    """
+    wanted = _collect_store_fields(indexes)
+    if not wanted:
+        return {}
+    largest_key, largest = max(((key, spec) for key, (_, spec) in wanted.items()), key=lambda item: item[1].nbytes)
+    if largest.nbytes > buffer_bytes:
+        raise ReplayDataError(
+            f"output store field {largest_key[0]}/{largest_key[1]} has {largest.nbytes} bytes, more than the "
+            f"{buffer_bytes}-byte read buffer; raise --output-store-local-buffer-size to at least {largest.nbytes}"
+        )
+
+    from radix_transfer_plugins import StoreRef
+    from radix_transfer_plugins.stashes.token_output import TokenOutputStash
+
+    reader = get_output_store_reader()
+    fetched: dict[tuple[str, str], np.ndarray] = {}
+    num_chunks = 0
+    for chunk in _chunk_by_bytes(wanted, buffer_bytes=buffer_bytes):
+        num_chunks += 1
+        refs = [StoreRef(backend=ref.backend, key=key, fields=tuple(specs)) for key, (ref, specs) in chunk.items()]
+        try:
+            stashes = reader.get_many(refs, stash_type=TokenOutputStash)
+        except Exception as e:
+            raise ReplayDataError(
+                f"failed to read {len(refs)} output store objects (first keys {[ref.key for ref in refs[:4]]}): {e!r}"
+            ) from e
+        for ref, stash in zip(refs, stashes, strict=True):
+            for spec in ref.fields:
+                # A copy, so the stash's view of the read buffer is dropped before the next chunk.
+                fetched[(ref.key, spec.name)] = np.array(getattr(stash, spec.name), copy=True)
+        del stashes
+    logger.info(
+        f"Read {len(wanted)} output store fields of {len({key for key, _ in wanted})} objects, "
+        f"{sum(spec.nbytes for _, spec in wanted.values())} bytes, in {num_chunks} chunks"
+    )
+    return fetched
+
+
+def _collect_store_fields(indexes: Sequence[ReplayIndex]) -> dict[tuple[str, str], tuple[Any, Any]]:
+    """(key, stored field) -> (ref, field spec), each object field once however many samples use it."""
+    wanted = {}
+    for index in indexes:
+        for ref, stored in index.store_reads():
+            specs = {spec.name: spec for spec in ref.fields}
+            for name in stored:
+                if name not in specs:
+                    raise ReplayDataError(f"output store object {ref.key} has no field {name}")
+                wanted.setdefault((ref.key, name), (ref, specs[name]))
+    return wanted
+
+
+def _chunk_by_bytes(
+    wanted: Mapping[tuple[str, str], tuple[Any, Any]], *, buffer_bytes: int
+) -> Iterator[dict[str, tuple[Any, list[Any]]]]:
+    chunk: dict[str, tuple[Any, list[Any]]] = {}
+    used = 0
+    for (key, _), (ref, spec) in wanted.items():
+        if chunk and used + spec.nbytes > buffer_bytes:
+            yield chunk
+            chunk, used = {}, 0
+        chunk.setdefault(key, (ref, []))[1].append(spec)
+        used += spec.nbytes
+    if chunk:
+        yield chunk
 
 
 # ============================ sampling mask (D9) ============================
