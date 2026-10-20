@@ -9,8 +9,10 @@ through shared memory (`--update-weight-transfer-mode shm`, about 3 s per sync f
 ## Environment
 
 The two halves need different PyTorch stacks, so they run from different Python environments.
+`docker/Dockerfile.tpu` (`python docker/build.py --variant tpu`, `radixark/miles:dev-tpu`) builds both:
+sglang-torchtpu in the system Python and the trainer in `/opt/venvs/train`. To set them up by hand:
 
-**sglang** runs from the sglang-torchtpu image's system Python (torch 2.11, torch_tpu 0.1.1).
+**sglang** runs from the sglang-torchtpu image's system Python (torch 2.11 and its torch_tpu).
 Nothing to install: its launcher only needs this checkout on `PYTHONPATH`.
 
 **The trainer** needs torch 2.13+ for torchtitan. Build a venv next to the image's Python:
@@ -34,6 +36,10 @@ pip install -e . && cd ..
 
 # miles itself
 pip install -e /path/to/miles
+
+# miles' router build (the sglang_router wheel of the radixark/miles-wheels release docker/Dockerfile.tpu
+# names): the PyPI sglang-router drops return_routed_experts, which routing replay (MoE) needs
+pip install --no-deps --force-reinstall /path/to/sglang_router-*.whl
 ```
 
 ## Run
