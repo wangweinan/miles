@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs, build_dataclass_parser, load_args_from_parser
+from miles.backends.training_utils.loss.hub.fixed_shape import fixed_shape_loss_enabled
 from miles.utils import accelerator
 
 _TPU_ATTENTION_BACKENDS = ("sdpa_blocks", "splash")
@@ -67,8 +68,13 @@ def validate_torchtitan_args(args) -> None:
             f"--titan-tpu-attention splash tiles the sequence in 1024-token blocks; --seq-length {args.seq_length} "
             "is not a multiple of 1024"
         )
+    # on TPU the fused log-prob op is the fixed-shape path's compiled XLA program, not the Triton kernel
     if accelerator.IS_TPU and args.log_probs_backend == "fused":
-        raise ValueError("--log-probs-backend fused is a Triton kernel; on TPU use --log-probs-backend torch")
+        if not fixed_shape_loss_enabled(args) or args.tensor_model_parallel_size != 1 or args.entropy_coef != 0:
+            raise ValueError(
+                "--log-probs-backend fused on TPU needs the fixed-shape loss (loss/hub/fixed_shape.py), "
+                "--tensor-model-parallel-size 1 and --entropy-coef 0; use --log-probs-backend torch"
+            )
     if accelerator.IS_TPU and args.use_dynamic_batch_size and args.max_tokens_per_gpu > args.seq_length:
         raise ValueError(
             f"--max-tokens-per-gpu {args.max_tokens_per_gpu} exceeds --seq-length {args.seq_length}: on TPU "

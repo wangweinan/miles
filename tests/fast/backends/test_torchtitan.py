@@ -63,11 +63,19 @@ def test_a_tpu_microbatch_cannot_outgrow_the_largest_length_bucket(monkeypatch):
     validate_torchtitan_args(_args(use_dynamic_batch_size=True, max_tokens_per_gpu=8192, log_probs_backend="torch"))
 
 
-def test_the_triton_log_prob_kernel_is_refused_on_tpu(monkeypatch):
+def test_the_tpu_fused_log_prob_needs_the_fixed_shape_loss(monkeypatch):
     monkeypatch.setattr(torch, "__version__", "2.13.0")
     monkeypatch.setattr(titan_arguments.accelerator, "IS_TPU", True)
-    with pytest.raises(ValueError, match="Triton"):
-        validate_torchtitan_args(_args(use_dynamic_batch_size=False, log_probs_backend="fused"))
+    tpu_fused = dict(
+        use_dynamic_batch_size=False, log_probs_backend="fused", tensor_model_parallel_size=1, entropy_coef=0
+    )
+    monkeypatch.setattr(titan_arguments, "fixed_shape_loss_enabled", lambda args: False)
+    with pytest.raises(ValueError, match="fixed-shape loss"):
+        validate_torchtitan_args(_args(**tpu_fused))
+    monkeypatch.setattr(titan_arguments, "fixed_shape_loss_enabled", lambda args: True)
+    validate_torchtitan_args(_args(**tpu_fused))
+    with pytest.raises(ValueError, match="entropy-coef 0"):
+        validate_torchtitan_args(_args(**{**tpu_fused, "entropy_coef": 0.01}))
 
 
 def test_splash_attention_needs_a_tpu_and_whole_1024_token_tiles(monkeypatch):
