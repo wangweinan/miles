@@ -74,6 +74,14 @@ The compiled path adds per-block `torch.compile` on the `tpu` backend, FSDP gath
 (`--titan-fsdp-gather-once`), and packed-document attention on native SDPA
 (`miles/backends/torchtitan_utils/tpu_doc_attention.py`, installed automatically on TPU).
 
+## fp32 SiLU
+
+v7x evaluates a bf16 SiLU in bf16, which makes Qwen3's logits noisier than on v6e.
+`--activation-in-fp32` (pass it to both `sglang` and `train`) computes `silu(gate)` in fp32 in the
+trainer (`train.py --activation-in-fp32`) and in the engine (`SGLANG_TPU_ACTIVATION_FP32=1`, needs an
+sglang with that switch); matmuls stay bf16. Turn it on for both sides or neither: fixing one side
+only widens the train-vs-rollout gap, so `train` refuses an engine whose setting differs.
+
 ## Notes
 
 - **Stop a training run gracefully while sglang is running.** The host's TPU network session is

@@ -114,6 +114,8 @@ class _ExternalEngineInfo:
     worker_type: WorkerType
     num_gpus: int
     disaggregation_bootstrap_port: int | None
+    # the engine's SGLANG_TPU_ACTIVATION_FP32; None when it does not expose its env (SGLANG_EXPOSE_OWN_ENV_VARS)
+    activation_fp32: bool | None
 
 
 def _compute_cells(*, args: Any, engines: list[_ExternalEngineInfo]) -> dict[str, _ExternalCell]:
@@ -224,7 +226,16 @@ async def _discover_external_engine(url: str, *, api_key: str | None) -> _Extern
         disaggregation_bootstrap_port=(
             int(x) if (x := server_info.get("disaggregation_bootstrap_port")) is not None else None
         ),
+        activation_fp32=_engine_activation_fp32(server_info),
     )
+
+
+def _engine_activation_fp32(server_info: dict[str, Any]) -> bool | None:
+    env_vars = server_info["internal_states"][0].get("env_vars")
+    if env_vars is None:
+        return None
+    # unset (or a non-TPU sglang) means the bf16 SiLU; the truthy spellings are sglang's EnvBool
+    return env_vars.get("SGLANG_TPU_ACTIVATION_FP32", "0").lower() in ("true", "1", "yes", "y")
 
 
 async def _fetch_server_info_with_retry(
@@ -248,6 +259,8 @@ async def _fetch_server_info_with_retry(
 
 
 def _assert_engines_match_args(args: Any, *, engines: list[_ExternalEngineInfo]) -> None:
+    _assert_engines_match_activation_fp32(args, engines=engines)
+
     discovered_total = sum(engine.num_gpus for engine in engines)
     assert discovered_total == args.rollout_num_gpus, (
         f"the external engines report {discovered_total} gpus in total "
@@ -276,3 +289,21 @@ def _assert_engines_match_args(args: Any, *, engines: list[_ExternalEngineInfo])
         f"--rollout-external-router-pd needs prefill and decode engines, got "
         f"{[(engine.url, engine.worker_type) for engine in engines]}"
     )
+
+
+def _assert_engines_match_activation_fp32(args: Any, *, engines: list[_ExternalEngineInfo]) -> None:
+    """--activation-in-fp32 helps only when the engines compute SiLU the same way, so the two cannot drift."""
+    trainer_fp32 = args.activation_in_fp32
+    for engine in engines:
+        if engine.activation_fp32 is None:
+            assert not trainer_fp32, (
+                f"--activation-in-fp32 needs the external engine {engine.url} to run with "
+                f"SGLANG_TPU_ACTIVATION_FP32=1, but it does not expose its env; start it with "
+                f"SGLANG_EXPOSE_OWN_ENV_VARS=1 so this can be checked"
+            )
+        else:
+            assert engine.activation_fp32 == trainer_fp32, (
+                f"the external engine {engine.url} runs with SGLANG_TPU_ACTIVATION_FP32="
+                f"{int(engine.activation_fp32)}, but --activation-in-fp32 is {trainer_fp32}; "
+                f"turn the fp32 SiLU on or off on both sides together"
+            )

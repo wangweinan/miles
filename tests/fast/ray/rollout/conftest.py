@@ -40,6 +40,7 @@ def make_args(**overrides: Any) -> Namespace:
         rollout_top_logprobs_num=0,
         rollout_sampling_logprobs_mode="selected",
         use_sampling_support_replay=False,
+        activation_in_fp32=False,
         over_sampling_batch_size=None,
         rollout_global_dataset=False,
         num_rollout=1,

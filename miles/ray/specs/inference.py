@@ -422,4 +422,7 @@ def compute_inference_engine_env_vars(args) -> dict[str, str]:
     # Match the trainer's temperature-scaled logprobs on every worker,
     # overriding inherited environment and dumper settings.
     env_vars["SGLANG_RETURN_ORIGINAL_LOGPROB"] = "0"
+    if args.activation_in_fp32:
+        # the trainer's fp32 SiLU narrows the train-vs-rollout gap only when the engine computes it the same way
+        env_vars["SGLANG_TPU_ACTIVATION_FP32"] = "1"
     return env_vars

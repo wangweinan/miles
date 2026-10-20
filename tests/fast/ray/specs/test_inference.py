@@ -527,6 +527,12 @@ class TestInferenceEngineEnvVars:
         assert envs["SGLANG_MEMORY_SAVER_CUDA_GRAPH"] == "true"
         assert int(envs["SGLANG_TIMEOUT_KEEP_ALIVE"]) > GeneralHttpClientProvider._LIMITS.keepalive_expiry
 
+    def test_the_fp32_silu_flag_turns_it_on_in_the_engines_too(self):
+        """The trainer's fp32 SiLU narrows the train-vs-rollout gap only when the engine computes SiLU the same way."""
+        assert "SGLANG_TPU_ACTIVATION_FP32" not in compute_inference_engine_env_vars(make_args())
+        envs = compute_inference_engine_env_vars(make_args(activation_in_fp32=True))
+        assert envs["SGLANG_TPU_ACTIVATION_FP32"] == "1"
+
     def test_custom_all_reduce_v2_is_disabled_only_for_colocated_multi_gpu_engines(self, monkeypatch):
         """Only a colocated engine spanning several gpus hits the v2 all-reduce conflict; disabling it elsewhere
         silently gives up throughput."""

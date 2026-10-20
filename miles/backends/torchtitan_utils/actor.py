@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
-from miles.backends.torchtitan_utils import compat, tpu_doc_attention
+from miles.backends.torchtitan_utils import compat, fp32_activation, tpu_doc_attention
 from miles.backends.torchtitan_utils.config import build_trainer_config
 from miles.backends.torchtitan_utils.hf_weight_iterator import TitanHfWeightIterator
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallel_dims_from_config
@@ -70,6 +70,8 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         self.load_hf_assets()
         if accelerator.IS_TPU:
             tpu_doc_attention.install(args.titan_tpu_attention)
+        if args.activation_in_fp32:
+            fp32_activation.install()
 
         self.trainer = TitanTrainer(config, fsdp_gather_once=args.titan_fsdp_gather_once)
         self.model_parts = self.trainer.model_parts

@@ -496,6 +496,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Whether to enable true-on-policy mode.",
             )
             parser.add_argument(
+                "--activation-in-fp32",
+                action="store_true",
+                default=False,
+                help=(
+                    "Compute silu(gate) of the SwiGLU MLPs in fp32 in both the trainer and the rollout engines "
+                    "(SGLANG_TPU_ACTIVATION_FP32=1); the matmuls keep the compute dtype. TPU v7x evaluates a "
+                    "bf16 SiLU in bf16 arithmetic, which makes the logits noisier than an fp32 forward. "
+                    "torchtitan backend only."
+                ),
+            )
+            parser.add_argument(
                 "--recompute-logprobs-via-prefill",
                 action="store_true",
                 default=False,
@@ -3442,6 +3453,11 @@ def miles_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
+
+    if args.activation_in_fp32 and args.train_backend != "torchtitan":
+        raise ValueError(
+            f"--activation-in-fp32 is implemented by the torchtitan backend only, got {args.train_backend}"
+        )
 
     mode = args.update_weight_transfer_mode
     if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta", "disk", "shm"):

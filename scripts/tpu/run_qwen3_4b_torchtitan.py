@@ -17,6 +17,8 @@ Args:
   --sglang-port: Port of the sglang server `train` connects to.
   --enable-compile: Per-block torch.compile with FSDP gather-once (default: on).
   --weight-transfer: shm (default) or disk.
+  --activation-in-fp32: SiLU in fp32 on both sides (train.py --activation-in-fp32, engine
+    SGLANG_TPU_ACTIVATION_FP32=1); pass it to `sglang` and `train` alike, `train` refuses a mismatch.
   --wandb-project: wandb project; empty disables wandb (the key comes from WANDB_API_KEY or ~/.netrc).
 
 =====================
@@ -69,6 +71,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     weight_dir: str = "/dev/shm/miles_weights"
     enable_compile: bool = True
     weight_transfer: Literal["shm", "disk"] = "shm"
+    activation_in_fp32: bool = False
     wandb_project: str = "miles-tpu"
     extra_args: str = ""
 
@@ -98,7 +101,10 @@ def _serve_sglang(args: ScriptArgs):
     _set_half_host_env()
     U.exec_command_cpu(
         f"source {args.sglang_env_script} && "
-        "SGLANG_TPU_PD_COLOCATED=1 python3 -m sglang.launch_server "
+        # SGLANG_EXPOSE_OWN_ENV_VARS lets `train` check the engine's SGLANG_TPU_ACTIVATION_FP32 against its own flag
+        "SGLANG_TPU_PD_COLOCATED=1 SGLANG_EXPOSE_OWN_ENV_VARS=1 "
+        f"SGLANG_TPU_ACTIVATION_FP32={int(args.activation_in_fp32)} "
+        "python3 -m sglang.launch_server "
         f"--model-path {args.model_dir}/{MODEL_NAME} "
         "--device tpu "
         "--dtype bfloat16 "
@@ -223,6 +229,8 @@ def _execute(args: ScriptArgs):
         "--gradient-checkpointing "
         "--distributed-backend tpu_dist "
     )
+    if args.activation_in_fp32:
+        train_backend_args += "--activation-in-fp32 "
     if args.enable_compile:
         train_backend_args += (
             "--titan-compile "

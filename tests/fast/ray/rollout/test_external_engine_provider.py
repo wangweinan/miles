@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 from argparse import Namespace
 from typing import Any
@@ -441,6 +442,7 @@ def _engine(*, url: str, num_gpus: int) -> _ExternalEngineInfo:
         worker_type=WorkerType.REGULAR,
         num_gpus=num_gpus,
         disaggregation_bootstrap_port=None,
+        activation_fp32=None,
     )
 
 
@@ -491,9 +493,55 @@ class TestAPdFleetRoles:
                 worker_type=worker_type,
                 num_gpus=1,
                 disaggregation_bootstrap_port=12090 if worker_type == WorkerType.PREFILL else None,
+                activation_fp32=None,
             )
             for index, worker_type in enumerate(worker_types)
         ]
 
         with pytest.raises(AssertionError, match="needs prefill and decode engines"):
             _assert_engines_match_args(args, engines=engines)
+
+
+def _payload_with_env(env_vars: dict[str, str] | None) -> dict[str, Any]:
+    payload = _regular_payload()
+    if env_vars is not None:
+        payload["internal_states"][0]["env_vars"] = env_vars
+    return payload
+
+
+class TestFp32SiluMatchesTheEngine:
+    @pytest.mark.parametrize(
+        "env_vars, expected",
+        [
+            (None, None),
+            ({}, False),
+            ({"SGLANG_TPU_ACTIVATION_FP32": "0"}, False),
+            ({"SGLANG_TPU_ACTIVATION_FP32": "1"}, True),
+        ],
+    )
+    async def test_discovery_reads_the_engines_setting(self, monkeypatch, env_vars, expected):
+        """An engine that exposes its env but lacks the key runs an sglang without the switch, i.e. bf16 SiLU."""
+        _install_payloads(monkeypatch, {"http://host1:8000": _payload_with_env(env_vars)})
+
+        engine = await _discover_external_engine("http://host1:8000", api_key=None)
+
+        assert engine.activation_fp32 is expected
+
+    @pytest.mark.parametrize("trainer_fp32, engine_fp32", [(False, None), (False, False), (True, True)])
+    def test_matching_sides_are_accepted(self, trainer_fp32, engine_fp32):
+        args = _make_args(["host1:8000"], activation_in_fp32=trainer_fp32)
+        engine = dataclasses.replace(_engine(url="http://host1:8000", num_gpus=1), activation_fp32=engine_fp32)
+
+        _assert_engines_match_args(args, engines=[engine])
+
+    @pytest.mark.parametrize(
+        "trainer_fp32, engine_fp32, match",
+        [(True, None, "does not expose its env"), (True, False, "both sides"), (False, True, "both sides")],
+    )
+    def test_one_sided_fp32_silu_is_refused(self, trainer_fp32, engine_fp32, match):
+        """Fixing one side only widens the gap, so the run must not start."""
+        args = _make_args(["host1:8000"], activation_in_fp32=trainer_fp32)
+        engine = dataclasses.replace(_engine(url="http://host1:8000", num_gpus=1), activation_fp32=engine_fp32)
+
+        with pytest.raises(AssertionError, match=match):
+            _assert_engines_match_args(args, engines=[engine])
