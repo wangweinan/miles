@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
-from miles.backends.torchtitan_utils import compat
+from miles.backends.torchtitan_utils import compat, tpu_doc_attention
 from miles.backends.torchtitan_utils.config import build_trainer_config
 from miles.backends.torchtitan_utils.hf_weight_iterator import TitanHfWeightIterator
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallel_dims_from_config
@@ -68,8 +68,10 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
 
         self.prof = TrainProfiler(args)
         self.load_hf_assets()
+        if accelerator.IS_TPU:
+            tpu_doc_attention.install()
 
-        self.trainer = TitanTrainer(config)
+        self.trainer = TitanTrainer(config, fsdp_gather_once=args.titan_fsdp_gather_once)
         self.model_parts = self.trainer.model_parts
         self.optimizers = self.trainer.optimizers.optimizers
         self.align_token_side_channel = self.trainer.align_token_side_channel
@@ -105,7 +107,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         if not args.ref_load:
             raise ValueError("--ref-load is required to build a torchtitan reference model")
         ref_config = build_trainer_config(args, hf_assets_path=args.ref_load, lr_total_steps=1, dump_subdir="ref")
-        ref_trainer = TitanTrainer(ref_config)
+        ref_trainer = TitanTrainer(ref_config, fsdp_gather_once=args.titan_fsdp_gather_once)
         ref_trainer.configure_loss_reduction()
         ref_trainer.checkpointer.load()
         for part in ref_trainer.model_parts:

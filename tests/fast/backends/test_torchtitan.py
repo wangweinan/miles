@@ -7,6 +7,7 @@ import pytest
 import torch
 from tests.ci.ci_register import register_cpu_ci
 
+from miles.backends.torchtitan_utils import arguments as titan_arguments
 from miles.backends.torchtitan_utils import parallel as tp
 from miles.backends.torchtitan_utils.arguments import validate_torchtitan_args
 
@@ -25,6 +26,7 @@ def _args(**overrides) -> Namespace:
         ref_update_interval=None,
         save_debug_train_data=None,
         fp16=False,
+        titan_fsdp_gather_once=False,
         lr_decay_style="constant",
         lr_warmup_fraction=None,
         lr_wsd_decay_iters=None,
@@ -50,6 +52,32 @@ def test_the_sequence_must_cover_the_rotary_tables(monkeypatch):
     validate_torchtitan_args(_args(seq_length=16384, rollout_max_context_len=None, rollout_max_response_len=8192))
 
 
+def test_a_tpu_microbatch_cannot_outgrow_the_largest_length_bucket(monkeypatch):
+    monkeypatch.setattr(torch, "__version__", "2.13.0")
+    monkeypatch.setattr(titan_arguments.accelerator, "IS_TPU", True)
+    with pytest.raises(ValueError, match="power-of-two bucket"):
+        validate_torchtitan_args(
+            _args(use_dynamic_batch_size=True, max_tokens_per_gpu=16384, log_probs_backend="torch")
+        )
+    validate_torchtitan_args(_args(use_dynamic_batch_size=True, max_tokens_per_gpu=8192, log_probs_backend="torch"))
+
+
+def test_the_triton_log_prob_kernel_is_refused_on_tpu(monkeypatch):
+    monkeypatch.setattr(torch, "__version__", "2.13.0")
+    monkeypatch.setattr(titan_arguments.accelerator, "IS_TPU", True)
+    with pytest.raises(ValueError, match="Triton"):
+        validate_torchtitan_args(_args(use_dynamic_batch_size=False, log_probs_backend="fused"))
+
+
+@pytest.mark.parametrize("seq_len", [1000, 1024, 3000, 8192])
+def test_the_recompile_limit_counts_every_tpu_length_bucket(seq_len):
+    """A bucket the limit misses is one compile too many, which a fullgraph block turns into a crash."""
+    pytest.importorskip("torchtitan")
+    from miles.backends.torchtitan_utils.trainer import tpu_length_bucket, tpu_length_buckets
+
+    assert {tpu_length_bucket(n, seq_len) for n in range(1, seq_len + 1)} == tpu_length_buckets(seq_len)
+
+
 def test_context_parallelism_is_rejected_for_qwen3_5(monkeypatch):
     monkeypatch.setattr(torch, "__version__", "2.13.0")
     with pytest.raises(ValueError, match="context parallelism"):
@@ -62,6 +90,8 @@ def test_unsupported_flags_are_rejected_rather_than_ignored(monkeypatch):
         validate_torchtitan_args(_args(ref_update_interval=4))
     with pytest.raises(ValueError, match="save-debug-train-data"):
         validate_torchtitan_args(_args(save_debug_train_data="/tmp/dump"))
+    with pytest.raises(ValueError, match="gather-once"):
+        validate_torchtitan_args(_args(titan_fsdp_gather_once=True, pipeline_model_parallel_size=2))
 
 
 def _config_args(**overrides) -> Namespace:
@@ -88,6 +118,7 @@ def _config_args(**overrides) -> Namespace:
         weight_decay=0.1,
         seed=1,
         gradient_checkpointing=False,
+        titan_compile=False,
         save=None,
         load=None,
     )

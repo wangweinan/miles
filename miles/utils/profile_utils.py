@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from miles.utils import accelerator
 from miles.utils.memory_utils import print_memory
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,43 @@ def _profile_simple_loop(iterator, args, name):
         torch_profiler.step()
 
 
+class _TpuXprofProfiler:
+    """torch.profiler's start()/step() interface over torch_tpu's xprof, which sees TPU device time."""
+
+    def __init__(self, args, name: str):
+        from torch_tpu._internal.profiler import _impl as xprof  # torch_tpu exists only on TPU
+
+        self._xprof = xprof
+        self._log_dir = str(Path(args.tensorboard_dir) / name)
+        self._worker = f"{name}_rank_{torch.distributed.get_rank()}"
+        self._start_step = args.profile_step_start
+        self._end_step = args.profile_step_end
+        self._step = 0
+        self._tracing = False
+
+    def start(self) -> None:
+        self._maybe_toggle()
+
+    def step(self) -> None:
+        self._step += 1
+        self._maybe_toggle()
+
+    def _maybe_toggle(self) -> None:
+        if not self._tracing and self._start_step <= self._step < self._end_step:
+            Path(self._log_dir).mkdir(parents=True, exist_ok=True)
+            self._xprof.start_trace(self._log_dir, worker_rank=self._worker)
+            self._tracing = True
+            logger.info(f"xprof trace started at step {self._step} -> {self._log_dir}")
+        elif self._tracing and self._step >= self._end_step:
+            torch.accelerator.synchronize()  # flush async TPU work into the trace
+            self._xprof.stop_trace()
+            self._tracing = False
+            logger.info(f"xprof trace stopped at step {self._step}")
+
+
 def _create_torch_profiler(args, name):
+    if accelerator.IS_TPU:
+        return _TpuXprofProfiler(args, name)
     return torch.profiler.profile(
         schedule=torch.profiler.schedule(
             # TODO the train_actor and train_log_probs ones may need to have different args to control step

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs, build_dataclass_parser, load_args_from_parser
+from miles.utils import accelerator
 
 
 @dataclass
@@ -16,6 +17,9 @@ class TorchtitanArgs(FSDPArgs):
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
+
+    titan_compile: bool = False  # torch.compile each TransformerBlock
+    titan_fsdp_gather_once: bool = False  # all-gather FSDP params once per pass, not per microbatch
 
 
 def build_torchtitan_parser(extra_args_provider=None):
@@ -48,6 +52,16 @@ def validate_torchtitan_args(args) -> None:
             "inside the rope kernel"
         )
 
+    if accelerator.IS_TPU and args.log_probs_backend == "fused":
+        raise ValueError("--log-probs-backend fused is a Triton kernel; on TPU use --log-probs-backend torch")
+    if accelerator.IS_TPU and args.use_dynamic_batch_size and args.max_tokens_per_gpu > args.seq_length:
+        raise ValueError(
+            f"--max-tokens-per-gpu {args.max_tokens_per_gpu} exceeds --seq-length {args.seq_length}: on TPU "
+            "packed microbatches are padded to a power-of-two bucket capped at --seq-length"
+        )
+
+    if args.titan_fsdp_gather_once and args.pipeline_model_parallel_size > 1:
+        raise ValueError("--titan-fsdp-gather-once does not apply to the pipeline schedule; drop it under PP")
     if args.ref_update_interval is not None:
         raise ValueError("--ref-update-interval is not supported by the torchtitan backend")
     if args.fp16:

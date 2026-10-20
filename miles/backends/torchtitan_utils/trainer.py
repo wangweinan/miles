@@ -1,9 +1,11 @@
+import contextlib
 import functools
 import inspect
 from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining.schedules import PipelineScheduleSingle
 from torch.distributed.tensor import DTensor
 from torchtitan.distributed import utils as titan_dist_utils
@@ -12,13 +14,27 @@ from torchtitan.trainer import Trainer
 
 from miles.backends.torchtitan_utils import routing_replay
 from miles.backends.training_utils.torch_native.step_runner import StepMetrics
+from miles.utils import accelerator
 from miles.utils.hf_utils.config import load_hf_config
 
 _FLEX_BLOCK = 128
 _CP_LENGTH_BUCKET = 1024
+_TPU_MIN_LENGTH_BUCKET = 1024
+
+
+def tpu_length_bucket(n_tokens: int, seq_len: int) -> int:
+    return min(max(_TPU_MIN_LENGTH_BUCKET, 1 << (n_tokens - 1).bit_length()), seq_len)
+
+
+def tpu_length_buckets(seq_len: int) -> set[int]:
+    return {tpu_length_bucket(1 << k, seq_len) for k in range(seq_len.bit_length() + 1)}
 
 
 class TitanTrainer(Trainer):
+    def __init__(self, config, *, fsdp_gather_once: bool) -> None:
+        self.fsdp_gather_once = fsdp_gather_once
+        super().__init__(config)
+
     @functools.cached_property
     def _family_forward_kwargs(self) -> dict:
         kwargs = {}
@@ -39,6 +55,14 @@ class TitanTrainer(Trainer):
                     f"{target}, which is the fixed shape PP stages exchange"
                 )
             return target
+        if accelerator.IS_TPU:
+            # TPU compiles one program per shape, so microbatches pad to a few power-of-two buckets
+            target = self.config.training.seq_len
+            if n_tokens > target:
+                raise ValueError(
+                    f"packed microbatch of {n_tokens} tokens exceeds --seq-length {target}, the largest TPU length bucket"
+                )
+            return tpu_length_bucket(n_tokens, target)
         if self.parallel_dims.cp_enabled:
             align = max(self.parallel_dims.cp * _FLEX_BLOCK, _CP_LENGTH_BUCKET)
             return n_tokens + (align - n_tokens % align) % align
@@ -108,6 +132,31 @@ class TitanTrainer(Trainer):
             backward_initialized = schedule._stages_backward_initialized
         return not forward_initialized or has_backward != backward_initialized
 
+    @functools.cached_property
+    def _fsdp_modules(self) -> list[FSDPModule]:
+        return [m for part in self.model_parts for m in part.modules() if isinstance(m, FSDPModule)]
+
+    @contextlib.contextmanager
+    def _gather_params_once(self):
+        # gather-once owns the reshard policy: params stay unsharded for the whole pass, then are freed
+        if not self.fsdp_gather_once:
+            yield
+            return
+        for module in self._fsdp_modules:
+            module.set_reshard_after_forward(False, recurse=False)
+        try:
+            yield
+        finally:
+            for module in self._fsdp_modules:
+                module.reshard()
+
+    def _set_grad_sync(self, is_last_microbatch: bool) -> None:
+        if not self.fsdp_gather_once:
+            return
+        for module in self._fsdp_modules:
+            module.set_requires_gradient_sync(is_last_microbatch, recurse=False)
+            module.set_reshard_after_backward(is_last_microbatch, recurse=False)
+
     def run_forward_backward(self, batches, loss_closure: Callable) -> list[dict]:
         batches = list(batches)
         self.loss_fn.arm(batches, loss_closure, is_training=True)
@@ -118,8 +167,10 @@ class TitanTrainer(Trainer):
                 self._bypass_schedule_probe(has_backward=True)
                 self.forward_backward_step(input_dict=input_dicts, labels=labels, global_valid_tokens=ones)
             else:
-                for input_dict, label in zip(input_dicts, labels, strict=True):
-                    self.forward_backward_step(input_dict=input_dict, labels=label, global_valid_tokens=ones)
+                with self._gather_params_once():
+                    for index, (input_dict, label) in enumerate(zip(input_dicts, labels, strict=True)):
+                        self._set_grad_sync(is_last_microbatch=index == len(input_dicts) - 1)
+                        self.forward_backward_step(input_dict=input_dict, labels=label, global_valid_tokens=ones)
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def run_forward(self, batches, compute: Callable) -> list:
@@ -144,10 +195,11 @@ class TitanTrainer(Trainer):
                     return_outputs=False,
                 )
             else:
-                for input_dict, label in zip(input_dicts, labels, strict=True):
-                    inputs, label, extra = self.post_dataloading_process(input_dict, label)
-                    pred = self.model_parts[0](inputs, **extra)
-                    self.loss_fn(pred, label)
+                with self._gather_params_once():
+                    for input_dict, label in zip(input_dicts, labels, strict=True):
+                        inputs, label, extra = self.post_dataloading_process(input_dict, label)
+                        pred = self.model_parts[0](inputs, **extra)
+                        self.loss_fn(pred, label)
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def apply_optimizer_step(self) -> StepMetrics:
@@ -169,6 +221,11 @@ class TitanTrainer(Trainer):
     def configure_loss_reduction(self) -> None:
         dims = self.parallel_dims
         self.loss_fn.set_gradient_scale(1.0 / (dims.dp_replicate * dims.dp_shard * dims.cp))
+        if accelerator.IS_TPU:
+            # fullgraph blocks fail past the limit instead of falling back to eager: one program per
+            # length bucket for each of the actor train, actor log-prob and ref log-prob passes
+            num_buckets = len(tpu_length_buckets(self.config.training.seq_len))
+            torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 3 * num_buckets)
         if not dims.cp_enabled:
             return
         torch._dynamo.config.recompile_limit = max(

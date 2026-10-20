@@ -11,6 +11,7 @@ from torchtitan.trainer import Trainer
 from miles.backends.torchtitan_utils.components import EmptyDataLoader, TiedCheckpointManager
 from miles.backends.torchtitan_utils.loss import RLLossAdapter
 from miles.backends.torchtitan_utils.parallel import parallel_dims_from_config
+from miles.utils import accelerator
 from miles.utils.hf_utils.config import load_hf_config
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,11 @@ def build_trainer_config(args: Namespace, *, hf_assets_path: str, lr_total_steps
     config.training.steps = max(lr_total_steps, 1)
     config.training.max_norm = args.clip_grad
     config.training.disable_cuda_graphs = True
+    if args.titan_compile:
+        config.compile.enable = True
+        config.compile.components = ["model"]
+        if accelerator.IS_TPU:
+            config.compile.backend = "tpu"
 
     config.optimizer.param_groups = [
         ParamGroupConfig(
