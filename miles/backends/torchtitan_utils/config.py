@@ -94,6 +94,7 @@ def build_trainer_config(args: Namespace, *, hf_assets_path: str, lr_total_steps
     config.training.steps = max(lr_total_steps, 1)
     config.training.max_norm = args.clip_grad
     config.training.disable_cuda_graphs = True
+    config.training.mixed_precision_reduce = args.titan_fsdp_reduce_dtype
     if args.titan_compile:
         config.compile.enable = True
         config.compile.components = ["model"]

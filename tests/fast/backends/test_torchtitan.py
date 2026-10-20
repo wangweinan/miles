@@ -18,6 +18,7 @@ def _args(**overrides) -> Namespace:
     base = dict(
         titan_model_name="qwen3",
         titan_tpu_attention="sdpa_blocks",
+        titan_fsdp_reduce_dtype="float32",
         seq_length=8192,
         pipeline_model_parallel_size=1,
         context_parallel_size=1,
@@ -141,6 +142,7 @@ def _config_args(**overrides) -> Namespace:
         titan_compile=False,
         save=None,
         load=None,
+        titan_fsdp_reduce_dtype="float32",
     )
     return Namespace(**{**base, **overrides})
 
