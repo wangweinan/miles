@@ -1,0 +1,79 @@
+# miles' TPU path against the sglang-torchtpu APIs it calls, on a hosted CPU runner (no TPU needed).
+# PRs test the sglang-torchtpu commit docker/Dockerfile.tpu pins; the daily run tests sglang-torchtpu main,
+# so an upstream breaking change shows up before the pin moves. It runs tests/fast/backends/tpu, whose files skip
+# in the regular CPU lane (no sglang_tpu there).
+name: TPU contract (sglang-torchtpu, CPU)
+
+on:
+  pull_request:
+    paths:
+      - "miles/utils/accelerator.py"
+      - "miles/utils/arguments.py"
+      - "miles/ray/specs/inference.py"
+      - "miles/rollout/generate_utils/**"
+      - "miles/rollout/session/**"
+      - "requirements.txt"
+      - "tests/ci/requirements-ci-cpu.txt"
+      - "miles/backends/sglang_utils/**"
+      - "miles/backends/torchtitan_utils/**"
+      - "miles/backends/training_utils/replay/**"
+      - "miles/backends/training_utils/weight_update/**"
+      - "miles/ray/rollout/external_engine_provider.py"
+      - "miles/utils/replay_base.py"
+      - "docker/Dockerfile.tpu"
+      - "tests/fast/backends/tpu/**"
+      - ".github/workflows/tpu-contract.yml"
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout miles
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Resolve the sglang-torchtpu ref
+        id: ref
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$(sed -n 's/^ARG SGLANG_TPU_COMMIT=//p' docker/Dockerfile.tpu)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout sglang-torchtpu
+        uses: actions/checkout@v4
+        with:
+          repository: sgl-project/sglang-torchtpu
+          ref: ${{ steps.ref.outputs.ref }}
+          path: sglang-torchtpu
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          UV_SYSTEM_PYTHON: "1"
+        # miles' pins, as in the trainer venv of docker/Dockerfile.tpu, which imports sglang from the engine's
+        # site-packages; the request structs and routes checked here do not depend on the engine's own pins
+        run: |
+          uv pip install -r requirements.txt -r tests/ci/requirements-ci-cpu.txt uvloop soundfile
+          echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/sglang-torchtpu/python:$GITHUB_WORKSPACE/sglang-torchtpu" >> "$GITHUB_ENV"
+
+      - name: Run the contract tests
+        shell: bash
+        env:
+          SGLANG_BUILD_RUST_EXTS: none
+        run: |
+          python -c 'import sglang, sglang_tpu; print(sglang.__file__, sglang_tpu.__file__)'
+          python -m pytest -q tests/fast/backends/tpu
