@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _meta
 
+from miles.backends.training_utils.data.replay import materialize_replay_columns
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
 from miles.rollout.generate_utils.generate_endpoint_utils import compute_request_payload, update_sample_from_response
 from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.utils.types import Sample
@@ -61,15 +63,22 @@ def test_filtered_native_generation_records_post_filter_distribution(candidate_c
         ),
         "finish_reason": {"type": "stop"},
     }
-    sample = Sample()
-    asyncio.run(update_sample_from_response(args, sample, payload, {"text": "2", "meta_info": meta}, True))
     if candidate_count:
-        validate_rollout_topk_logprobs_sample(sample, 3)
-        np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
-        np.testing.assert_allclose(np.exp(sample.rollout_topk_log_probs[0, :2]), [3 / 7, 4 / 7])
+        meta["output_token_sampling_selected_logprobs"] = [math.log(4 / 7)]
+    sample = Sample(index=0, group_index=0, reward=1.0, status=Sample.Status.COMPLETED)
+    asyncio.run(update_sample_from_response(args, sample, payload, {"text": "2", "meta_info": meta}, True))
+    # The rollout keeps the sampled tokens' post-filter log-probs; the trainer derives the candidates.
+    assert sample.rollout_topk_token_ids is None
+    assert sample.rollout_log_probs == pytest.approx([math.log(4 / 7)])
+    data = convert_samples_to_train_data(args, [sample], {}, None, None)
+    materialize_replay_columns(args, data)
+    if candidate_count:
+        # Score centering shares the ordered support IDs instead of a dense candidate array.
+        assert data["rollout_topk_lengths"][0].tolist() == [2]
+        np.testing.assert_allclose(np.exp(data["rollout_topk_log_probs"][0][0, :2]), [3 / 7, 4 / 7], rtol=1e-6)
     else:
-        assert sample.rollout_topk_token_ids is None and sample.rollout_topk_log_probs is None
-    np.testing.assert_allclose(sample.rollout_log_probs, [math.log(4 / 7)])
+        assert "rollout_topk_token_ids" not in data and "rollout_topk_log_probs" not in data
+    np.testing.assert_allclose(data["rollout_log_probs"][0], [math.log(4 / 7)], rtol=1e-6)
 
 
 def test_greedy_evaluation_does_not_collect_training_candidates() -> None:

@@ -5,7 +5,7 @@ from typing import Any
 import numpy
 import torch
 
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.replay_index import ReplayIndex
 
 LEGACY_WEIGHT_VERSIONS_KEY = "legacy_weight_versions"
 
@@ -186,13 +186,9 @@ class Sample:
     rollout_log_probs: list[float] | None = None  # Log probabilities from rollout engine
     rollout_topk_token_ids: numpy.ndarray | None = None  # [response_length, k], int32; -1 pads unused slots
     rollout_topk_log_probs: numpy.ndarray | None = None  # [response_length, k], float32; -inf pads unused slots
-    rollout_sampling_mask: RolloutSamplingMask | None = None
-    rollout_routed_experts: numpy.ndarray | None = (
-        None  # Routed experts from rollout engine. shape: (num_tokens-1, num_layers, moe_router_topk), dtype=int32
-    )
-    rollout_indexer_topk: numpy.ndarray | None = (
-        None  # Indexer topk from rollout engine. shape: (num_tokens-1, num_indexer_layers, index_topk), dtype=int32
-    )
+    # Routed experts, indexer top-k and sampling mask from the rollout engine, as row segments of inline
+    # arrays; the trainer materializes them.
+    replay_index: ReplayIndex = field(default_factory=ReplayIndex)
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
@@ -365,10 +361,9 @@ class Sample:
             assert (
                 ids.shape[0] == self.response_length
             ), "Rollout top-k logprobs candidates do not match response length"
-        if self.rollout_sampling_mask is not None:
-            assert len(self.rollout_sampling_mask) == self.response_length, (
-                f"rollout_sampling_mask length ({len(self.rollout_sampling_mask)}) "
-                f"!= response_length ({self.response_length})"
+        if (sampling_mask := self.replay_index.sampling_mask) is not None:
+            assert sampling_mask.num_rows == self.response_length, (
+                f"sampling mask length ({sampling_mask.num_rows}) " f"!= response_length ({self.response_length})"
             )
         if self.teacher_log_probs is not None:
             assert (
@@ -378,21 +373,21 @@ class Sample:
             assert (
                 len(self.opd_reverse_kl) == self.response_length
             ), f"opd_reverse_kl length ({len(self.opd_reverse_kl)}) != response_length ({self.response_length})"
-        if self.rollout_routed_experts is not None:
-            actual = len(self.rollout_routed_experts)
+        if (routed_experts := self.replay_index.routed_experts) is not None:
+            actual = routed_experts.num_rows
             expect = len(self.tokens) - 1
             mm = self.multimodal_train_inputs or {}
             extra = sum(
                 int(c) - 1 for key in ("mm_vision_num_patches", "mm_audio_num_tokens") for c in list(mm.get(key) or [])
             )
             assert actual in (expect, expect + extra), (
-                f"rollout_routed_experts length ({actual}) != len(tokens) - 1 ({expect})"
+                f"routed experts length ({actual}) != len(tokens) - 1 ({expect})"
                 f" or media-expanded ({expect + extra})"
             )
-        if self.rollout_indexer_topk is not None:
-            actual = len(self.rollout_indexer_topk)
+        if (indexer_topk := self.replay_index.indexer_topk) is not None:
+            actual = indexer_topk.num_rows
             expect = len(self.tokens) - 1
-            assert actual == expect, f"rollout_indexer_topk length ({actual}) != len(tokens) - 1 ({expect})"
+            assert actual == expect, f"indexer top-k length ({actual}) != len(tokens) - 1 ({expect})"
         previous_end = 0
         for span in self.all_weight_version_spans:
             assert span.version, f"weight version span has empty version: {self.weight_versions}"
@@ -417,8 +412,7 @@ class Sample:
             self.rollout_topk_log_probs = self.rollout_topk_log_probs[:-n]
         if self.rollout_log_probs is not None:
             self.rollout_log_probs = self.rollout_log_probs[:-n]
-        if self.rollout_sampling_mask is not None:
-            self.rollout_sampling_mask = self.rollout_sampling_mask.prefix(self.response_length)
+        self.replay_index = self.replay_index.strip_tail(n)
         if self.teacher_log_probs is not None:
             self.teacher_log_probs = self.teacher_log_probs[:-n]
         if self.opd_reverse_kl is not None:
@@ -428,10 +422,6 @@ class Sample:
         if self.loss_mask is not None:
             self.loss_mask = self.loss_mask[:-n]
         self.response = tokenizer.decode(self.tokens[-self.response_length :]) if self.response_length > 0 else ""
-        if self.rollout_routed_experts is not None:
-            self.rollout_routed_experts = self.rollout_routed_experts[:-n]
-        if self.rollout_indexer_topk is not None:
-            self.rollout_indexer_topk = self.rollout_indexer_topk[:-n]
         self.weight_versions = [
             call for call in self.weight_versions if call.output_start is None or call.output_start <= len(self.tokens)
         ]
@@ -459,9 +449,7 @@ class Sample:
         self.rollout_log_probs = None
         self.rollout_topk_token_ids = None
         self.rollout_topk_log_probs = None
-        self.rollout_sampling_mask = None
-        self.rollout_routed_experts = None
-        self.rollout_indexer_topk = None
+        self.replay_index = ReplayIndex()
         self.status = Sample.Status.ABORTED
         self.trainer_model_id = None
         self.kv_cache_namespace = None

@@ -1,10 +1,12 @@
 from copy import deepcopy
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import numpy
 import pytest
 
 from miles.rollout.generate_utils.sample_utils import _merge_sample_pair, merge_samples
+from miles.utils.replay_index import ReplayIndex
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -207,12 +209,20 @@ class TestMergeSamples:
             loss_mask=[1],
             rollout_log_probs=[-0.2],
         )
-        a.rollout_indexer_topk = numpy.zeros((2, 2, 3), dtype=numpy.int32)
-        b.rollout_indexer_topk = numpy.ones((4, 2, 3), dtype=numpy.int32)
+        a.replay_index = replace(
+            a.replay_index,
+            indexer_topk=ReplayIndex.from_arrays(indexer_topk=numpy.zeros((2, 2, 3), dtype=numpy.int32)).indexer_topk,
+        )
+        b.replay_index = replace(
+            b.replay_index,
+            indexer_topk=ReplayIndex.from_arrays(indexer_topk=numpy.ones((4, 2, 3), dtype=numpy.int32)).indexer_topk,
+        )
 
         merged = _merge_sample_pair(a, b, mock_tokenizer)
 
-        numpy.testing.assert_array_equal(merged.rollout_indexer_topk, b.rollout_indexer_topk)
+        numpy.testing.assert_array_equal(
+            merged.replay_index.indexer_topk.materialize_rows({}), b.replay_index.indexer_topk.materialize_rows({})
+        )
 
     def test_loss_mask_none_defaults_to_all_ones(self, mock_tokenizer):
         a = make_sample(
@@ -300,10 +310,15 @@ class TestMergeSamples:
         # raise a clear assertion rather than an AttributeError on None.shape.
         a = make_sample(tokens=[1, 2, 10], response_length=1, loss_mask=[1])
         b = make_sample(tokens=[1, 2, 10, 20, 30], response_length=1, loss_mask=[1])
-        a.rollout_routed_experts = numpy.zeros((2, 2, 3), dtype=numpy.int32)
-        b.rollout_routed_experts = None
+        a.replay_index = replace(
+            a.replay_index,
+            routed_experts=ReplayIndex.from_arrays(
+                routed_experts=numpy.zeros((2, 2, 3), dtype=numpy.int32)
+            ).routed_experts,
+        )
+        b.replay_index = replace(b.replay_index, routed_experts=None)
 
-        with pytest.raises(AssertionError, match="a has rollout_routed_experts but b does not"):
+        with pytest.raises(AssertionError, match="a has routed_experts but b does not"):
             _merge_sample_pair(a, b, mock_tokenizer)
 
     def test_merge_samples_stops_at_routing_gap(self, mock_tokenizer):
@@ -316,11 +331,16 @@ class TestMergeSamples:
             loss_mask=[1],
             status=Sample.Status.TRUNCATED,
         )
-        t0.rollout_routed_experts = numpy.zeros((2, 2, 3), dtype=numpy.int32)
-        t1.rollout_routed_experts = None
+        t0.replay_index = replace(
+            t0.replay_index,
+            routed_experts=ReplayIndex.from_arrays(
+                routed_experts=numpy.zeros((2, 2, 3), dtype=numpy.int32)
+            ).routed_experts,
+        )
+        t1.replay_index = replace(t1.replay_index, routed_experts=None)
 
         merged = merge_samples([t0, t1], mock_tokenizer)
 
         assert merged is t0
         assert merged.tokens == t0.tokens
-        assert merged.rollout_routed_experts is not None
+        assert merged.replay_index.routed_experts is not None

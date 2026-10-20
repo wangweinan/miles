@@ -14,6 +14,7 @@ from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.generate_hub import single_turn
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
 from miles.utils.processing_utils import encode_image_for_rollout_engine
+from miles.utils.replay_index import ReplayIndex
 from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
@@ -127,7 +128,7 @@ def expected_sample(
         loss_mask=loss_mask,
         weight_versions=expected_weight_versions,
         rollout_log_probs=RESPONSE_LOG_PROBS if isinstance(rollout_log_probs, _Unset) else rollout_log_probs,
-        rollout_routed_experts=rollout_routed_experts,
+        replay_index=ReplayIndex.from_arrays(routed_experts=rollout_routed_experts),
         remove_sample=False,
         status=status,
         metadata={},
@@ -312,9 +313,13 @@ class TestRoutedExperts:
         result = _run_generate(variant, generation_env)
         assert result.requests == [expected_request(variant, return_routed_experts=True)]
         sample = result.sample[0] if isinstance(result.sample, list) else result.sample
-        assert sample.rollout_routed_experts is not None
-        assert sample.rollout_routed_experts.shape == (num_tokens - 1, num_layers, moe_router_topk)
-        np.testing.assert_array_equal(sample.rollout_routed_experts, routed_experts_array)
+        assert sample.replay_index.routed_experts is not None
+        assert sample.replay_index.routed_experts.materialize_rows({}).shape == (
+            num_tokens - 1,
+            num_layers,
+            moe_router_topk,
+        )
+        np.testing.assert_array_equal(sample.replay_index.routed_experts.materialize_rows({}), routed_experts_array)
 
 
 class TestMetaInfo:

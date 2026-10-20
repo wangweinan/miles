@@ -11,7 +11,6 @@ from miles.rollout.generate_utils.sampling_mask import should_return_sampling_ma
 from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
     COMPUTED_FIELDS_V2,
-    ROLLOUT_SAMPLING_MASK_FIELDS,
     SamplesReply,
     decode_samples_and_merge_input_sample,
 )
@@ -75,8 +74,8 @@ class OpenAIEndpointTracer:
         )
         use_v2 = getattr(args, "use_session_server", None) == "v2"
         samples_wire_fields = COMPUTED_FIELDS_V2 if use_v2 else COMPUTED_FIELDS
-        if should_return_sampling_mask(args, sampling_params, evaluation=evaluation):
-            samples_wire_fields += ROLLOUT_SAMPLING_MASK_FIELDS
+        # Validate the training sampling contract before allocating a session.
+        should_return_sampling_mask(args, sampling_params, evaluation=evaluation)
         response = await post(f"{session_url}/sessions", body.model_dump(exclude_none=True), action="post")
         session_id = response["session_id"]
         return OpenAIEndpointTracer(

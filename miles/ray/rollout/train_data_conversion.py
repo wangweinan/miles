@@ -8,6 +8,7 @@ from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRec
 from miles.utils.dp_schedule import TrainParallelConfig, build_dp_schedule
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
+from miles.utils.replay_index import INLINE_TRAIN_COLUMNS, REPLAY_INDEX_COLUMN, compute_train_columns
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
@@ -26,12 +27,12 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "rollout_sampling_mask_offsets": "int64",
     "teacher_log_probs": "float32",
     "opd_reverse_kl": "float32",
-    "rollout_routed_experts": "int32",
-    "rollout_indexer_topk": "int32",
+    **{column: dtype.name for column, dtype in INLINE_TRAIN_COLUMNS.values()},
 }
 
 ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     **{field: ValueSpec(codec="typed_ragged") for field in ROLLOUT_DATA_TENSOR_DTYPES},
+    REPLAY_INDEX_COLUMN: ValueSpec(codec="msgpack_ragged"),
     "partition": ValueSpec(codec="ndarray", dtype="int64"),
     "seq_witness_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "response_lengths": ValueSpec(codec="ndarray", dtype="int64"),
@@ -128,55 +129,11 @@ def convert_samples_to_train_data(
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
     if k := args.rollout_top_logprobs_num:
-        for sample in samples:
-            for field in ("rollout_topk_token_ids", "rollout_topk_log_probs", "rollout_log_probs"):
-                if getattr(sample, field) is None:
-                    raise ValueError(
-                        f"Rollout top-k logprobs collection requires {field}; "
-                        f"sample_index={sample.index}. Custom rollout producers must record probabilities during generation."
-                    )
-        if args.ci_test:
-            for sample in samples:
-                validate_rollout_topk_logprobs_sample(sample, k)
-        train_data["rollout_topk_token_ids"] = [sample.rollout_topk_token_ids for sample in samples]
-        train_data["rollout_topk_log_probs"] = [sample.rollout_topk_log_probs for sample in samples]
+        _add_rollout_topk_logprobs(args, samples, train_data, k=k)
 
-    has_sampling_mask = any(sample.rollout_sampling_mask is not None for sample in samples)
-    if has_sampling_mask:
-        sampling_mask_ids = []
-        sampling_mask_offsets = []
-        for position, sample in enumerate(samples):
-            sample.validate()
-            if sample.rollout_sampling_mask is None:
-                raise ValueError(
-                    "sampling-mask data must be present for every training sample; "
-                    f"missing at position={position}, sample_index={sample.index}, status={sample.status}"
-                )
-            ids, offsets = sample.rollout_sampling_mask._as_tensors()
-
-            sampling_mask_ids.append(ids)
-            sampling_mask_offsets.append(offsets)
-
-        train_data["rollout_sampling_mask_ids"] = sampling_mask_ids
-        train_data["rollout_sampling_mask_offsets"] = sampling_mask_offsets
-        if k and args.loss_type == "score_centering" and args.rollout_sampling_logprobs_mode == "support":
-            _compact_candidate_ids(train_data)
-
-    if samples[0].rollout_routed_experts is not None:
-        train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
-    elif getattr(args, "use_rollout_routing_replay", False):
-        raise ValueError(
-            "--use-rollout-routing-replay is set but the rollout samples carry no "
-            "rollout_routed_experts: the engine response meta_info lacked 'routed_experts'."
-        )
-
-    if samples[0].rollout_indexer_topk is not None:
-        train_data["rollout_indexer_topk"] = [sample.rollout_indexer_topk for sample in samples]
-    elif getattr(args, "use_rollout_indexer_replay", False):
-        raise ValueError(
-            "--use-rollout-indexer-replay is set but the rollout samples carry no "
-            "rollout_indexer_topk: the engine response meta_info lacked 'indexer_topk'."
-        )
+    _check_replay_fields_present(args, samples)
+    # R3, indexer top-k and the sampling mask go as replay indexes; the trainer reads and derives them.
+    train_data.update(compute_train_columns([sample.replay_index for sample in samples]))
 
     if samples[0].train_metadata is not None:
         train_data["metadata"] = [sample.train_metadata for sample in samples]
@@ -204,35 +161,54 @@ def convert_samples_to_train_data(
     return train_data
 
 
-def _compact_candidate_ids(data: dict) -> None:
-    """Share ordered support IDs in training batches; preserve other producer layouts."""
-    lengths = []
-    for dense, logps, support, offsets in zip(
-        data["rollout_topk_token_ids"],
-        data["rollout_topk_log_probs"],
-        data["rollout_sampling_mask_ids"],
-        data["rollout_sampling_mask_offsets"],
-        strict=True,
-    ):
-        dense, logps = torch.as_tensor(dense), torch.as_tensor(logps)
-        if dense.ndim != 2 or dense.shape != logps.shape or dense.size(0) != offsets.numel() - 1:
-            return
-        valid = dense >= 0
-        count = valid.sum(-1, dtype=torch.int32)
-        columns = torch.arange(dense.size(1))
-        prefix = columns < count[:, None]
-        if not torch.equal(valid, prefix) or not (dense[~prefix] == -1).all():
-            return
-        if not (count[count > 0] == offsets.diff()[count > 0]).all():
-            return
-        positions = offsets[:-1, None] + columns
-        if not torch.equal(dense[prefix], support[positions[prefix]]):
-            return
-        if not torch.isneginf(logps[count == 0]).all():
-            return
-        lengths.append(count)
-    data["rollout_topk_lengths"] = lengths
-    del data["rollout_topk_token_ids"]
+def _add_rollout_topk_logprobs(args, samples: list[Sample], train_data: dict, *, k: int) -> None:
+    support = args.rollout_sampling_logprobs_mode == "support"
+    # In support mode the trainer derives the candidates from the sampling mask unless a custom producer recorded them.
+    derived = support and all(sample.rollout_topk_token_ids is None for sample in samples)
+    fields = (
+        ("rollout_log_probs",)
+        if derived
+        else ("rollout_topk_token_ids", "rollout_topk_log_probs", "rollout_log_probs")
+    )
+    for sample in samples:
+        for field in fields:
+            if getattr(sample, field) is None:
+                raise ValueError(
+                    f"Rollout top-k logprobs collection requires {field}; "
+                    f"sample_index={sample.index}. Custom rollout producers must record probabilities during generation."
+                )
+    if derived:
+        return
+    if args.ci_test and not support:
+        for sample in samples:
+            validate_rollout_topk_logprobs_sample(sample, k)
+    train_data["rollout_topk_token_ids"] = [sample.rollout_topk_token_ids for sample in samples]
+    train_data["rollout_topk_log_probs"] = [sample.rollout_topk_log_probs for sample in samples]
+
+
+def _check_replay_fields_present(args, samples: list[Sample]) -> None:
+    """Every training sample carries each replay field the launch flags ask for."""
+    required = (
+        ("routed_experts", getattr(args, "use_rollout_routing_replay", False), "'routed_experts'"),
+        ("indexer_topk", getattr(args, "use_rollout_indexer_replay", False), "'indexer_topk'"),
+    )
+    for field, enabled, meta_key in required:
+        if not enabled:
+            continue
+        for sample in samples:
+            if getattr(sample.replay_index, field) is None:
+                raise ValueError(
+                    f"--use-rollout-{'routing' if field == 'routed_experts' else 'indexer'}-replay is set but "
+                    f"rollout sample index={sample.index} carries no {field}: the engine response lacked {meta_key}."
+                )
+    if any(sample.replay_index.sampling_mask is not None for sample in samples):
+        for position, sample in enumerate(samples):
+            sample.validate()
+            if sample.replay_index.sampling_mask is None:
+                raise ValueError(
+                    "sampling-mask data must be present for every training sample; "
+                    f"missing at position={position}, sample_index={sample.index}, status={sample.status}"
+                )
 
 
 def _get_training_sample_identity_columns(samples: list[Sample]) -> dict[str, list[int]]:
@@ -482,8 +458,8 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "rollout_topk_log_probs",
             "rollout_sampling_mask_ids",
             "rollout_sampling_mask_offsets",
-            "rollout_routed_experts",
-            "rollout_indexer_topk",
+            REPLAY_INDEX_COLUMN,
+            *(column for column, _ in INLINE_TRAIN_COLUMNS.values()),
             "prompt",
             "teacher_log_probs",
             "opd_reverse_kl",

@@ -26,7 +26,7 @@ from miles.rollout.session.errors import (
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.request_args import ClientResponseIntent, filter_turn_args, parse_chat_request
-from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
+from miles.rollout.session.samples.codec import COMPUTED_FIELDS, encode_samples
 from miles.rollout.session.samples.merge import (
     compute_samples_from_openai_records,
     merge_samples_with_addition_r3,
@@ -284,8 +284,6 @@ class SessionCore:
         metadata = self._session_metadata(session_id, session)
         tokenizer = self.registry.tokenizer
         fields = COMPUTED_FIELDS
-        if session.sampling_support_replay:
-            fields += ROLLOUT_SAMPLING_MASK_FIELDS
         if not session.records:
             return _samples_response(encode_samples([], metadata, empty_reason="no_records", fields=fields))
         try:

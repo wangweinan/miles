@@ -188,7 +188,8 @@ async def test_eval_policy_survives_continuation_and_retry_and_collects_without_
     reply = decode_samples_and_merge_input_sample(response.content, Sample(), fields=fields)
     assert reply.samples
     assert all(
-        sample.rollout_routed_experts is None and sample.rollout_indexer_topk is None for sample in reply.samples
+        sample.replay_index.routed_experts is None and sample.replay_index.indexer_topk is None
+        for sample in reply.samples
     )
     assert (await env.client.delete(f"/sessions/{sid}")).status_code == 204
 

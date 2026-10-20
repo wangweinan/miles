@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
+from miles.backends.training_utils.data.replay import materialize_replay_columns
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
@@ -20,9 +21,8 @@ from miles.ray.rollout.train_data_conversion import (
     split_train_data_by_dp_scheduled_raw,
 )
 from miles.utils.object_store import RayObjectStore
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.replay_index import ReplayIndex
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
-
 
 # ----------------------------- convert_samples_to_train_data -----------------------------
 
@@ -147,13 +147,10 @@ class TestConvertSamplesToTrainData:
         )
         assert out["rollout_log_probs"][0] == [-0.1, -0.2, -0.3, -0.4]
 
-    def test_sampling_mask_passed_through(self):
-        args = make_args(rewards_normalization=False)
+    def test_sampling_mask_crosses_as_raw_columns_and_the_trainer_derives_csr(self):
+        args = make_args(rewards_normalization=False, rollout_sampling_logprobs_mode="selected")
         s = make_sample()
-        s.rollout_sampling_mask = RolloutSamplingMask(
-            ids=[0, 7, 1, 8, 2, 9, 3, 10],
-            offsets=[0, 2, 4, 6, 8],
-        )
+        s.replay_index = _inline_mask(s, supports=[[s.tokens[-4 + i], 7 + i] for i in range(4)])
         out = convert_samples_to_train_data(
             args,
             [s],
@@ -161,16 +158,18 @@ class TestConvertSamplesToTrainData:
             custom_convert_samples_to_train_data_func=None,
             custom_reward_post_process_func=None,
         )
-        assert out["rollout_sampling_mask_ids"][0].tolist() == [0, 7, 1, 8, 2, 9, 3, 10]
+        assert out["rollout_sampling_mask_lengths"][0].tolist() == [2, 2, 2, 2]
+        assert out["replay_index"][0] == {"sampling_mask": [{"inline": 4}]}
+        materialize_replay_columns(args, out)
+        assert out["rollout_sampling_mask_ids"][0].tolist() == [
+            value for i in range(4) for value in (s.tokens[-4 + i], 7 + i)
+        ]
         assert out["rollout_sampling_mask_offsets"][0].tolist() == [0, 2, 4, 6, 8]
 
     def test_sampling_mask_requires_complete_batch(self):
         args = make_args(rewards_normalization=False)
         captured = make_sample(index=8)
-        captured.rollout_sampling_mask = RolloutSamplingMask(
-            ids=[0, 7, 1, 8, 2, 9, 3, 10],
-            offsets=[0, 2, 4, 6, 8],
-        )
+        captured.replay_index = _inline_mask(captured, supports=[[token] for token in captured.tokens[-4:]])
 
         with pytest.raises(
             ValueError,
@@ -1139,3 +1138,17 @@ def test_delayed_dp_split_preserves_the_tinker_loss_vectors():
     for shard in shards:
         assert shard["loss_weights"] and shard["advantages"] and shard["rollout_log_probs"]
     assert shards[0]["advantages"] == [[0.5], [0.5]]
+
+
+def _inline_mask(sample: Sample, *, supports: list[list[int]]) -> ReplayIndex:
+    return ReplayIndex.from_meta_info(
+        {"output_token_sampling_mask": supports, "output_token_sampling_logprobs": [-0.5] * len(supports)},
+        routed_experts_rows=None,
+        num_layers=None,
+        indexer_topk_rows=None,
+        indexer_num_streams=None,
+        return_sampling_mask=True,
+        support_logprobs=False,
+        num_output_tokens=sample.response_length,
+        aborted=False,
+    )

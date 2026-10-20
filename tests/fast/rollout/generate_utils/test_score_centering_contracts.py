@@ -14,7 +14,7 @@ from miles.rollout.generate_utils.rollout_topk_logprobs import (
     validate_rollout_topk_logprobs_sample,
 )
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, decode_samples_and_merge_input_sample, encode_samples
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs
 from miles.utils.score_centering import validate_score_centering_args
 from miles.utils.types import Sample
 
@@ -177,10 +177,9 @@ def test_missing_or_mismatched_probabilities_fail_before_training() -> None:
         append_rollout_topk_logprobs(Sample(response_length=1), {"output_token_logprobs": [(-1.0, 2, None)]}, 3)
 
 
-@pytest.mark.parametrize("mode", ["selected", "support"])
-def test_zero_token_completion_accepts_missing_candidate_fields(mode: str) -> None:
+def test_zero_token_completion_accepts_missing_candidate_fields() -> None:
     sample = Sample(response_length=0)
-    append_rollout_topk_logprobs(sample, {}, 3, sampling_logprobs_mode=mode)
+    append_rollout_topk_logprobs(sample, {}, 3)
     assert sample.rollout_topk_token_ids.shape == (0, 3)
     assert sample.rollout_topk_log_probs.shape == (0, 3)
 
@@ -190,10 +189,18 @@ def test_zero_token_completion_accepts_missing_candidate_fields(mode: str) -> No
 def test_duplicate_candidates_are_rejected(support: bool, candidates: list[int]) -> None:
     sample = _turn([0], [2, 3], [0.5, 0.25])
     sample.rollout_topk_token_ids[:] = candidates
-    if support:
-        sample.rollout_sampling_mask = RolloutSamplingMask.from_mask_list([[2, 3], [2, 3]])
     with pytest.raises(ValueError, match="Duplicate.*candidate token IDs"):
-        validate_rollout_topk_logprobs_sample(sample, 3)
+        if support:
+            validate_rollout_topk_logprobs(
+                sample.rollout_topk_token_ids,
+                sample.rollout_topk_log_probs,
+                sampled_log_probs=np.asarray(sample.rollout_log_probs),
+                response_tokens=np.asarray([2, 3]),
+                loss_mask=np.ones(2, dtype=bool),
+                support=(np.asarray([2, 3, 2, 3], dtype=np.int32), np.asarray([0, 2, 4])),
+            )
+        else:
+            validate_rollout_topk_logprobs_sample(sample, 3)
 
 
 @pytest.mark.parametrize("candidates", [[2, 3, -1], [-1, 3, 2], [-1, 2, -1], [-1, -1, -1]])

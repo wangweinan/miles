@@ -2,25 +2,21 @@
 
 Owned by the session package so the assembly runs on the owning instance (records never have to leave the session server). The wire codec for the assembled reply lives in `codec`.
 
-- Depends on `generate_utils.generate_endpoint_utils` for the R3 replay decoders (accepted utils-level dependency: the decoders have other consumers on the single-turn `/generate` path and must not fork).
+- Depends on `generate_utils.generate_endpoint_utils` for the replay parser (accepted utils-level dependency: the parser has other consumers on the single-turn `/generate` path and must not fork).
 - Order contract: `truncate_samples_by_total_tokens` runs BEFORE `merge_samples` — truncation is a turn-level budget decision (which turns survive; the overflowing turn is cut at a turn boundary, later turns are dropped) and the turn structure only exists pre-merge.
-- Additional R3 patches stay out of per-turn `Sample`s; after the ordinary merge selects the final token prefix, the session assembler decodes and concatenates only the patches needed for that prefix.
+- Additional R3 patches stay out of per-turn `Sample`s; after the ordinary merge selects the final token prefix, the session assembler concatenates the row segments of only the patches needed for that prefix.
 """
 
 from argparse import Namespace
 from copy import deepcopy
+from dataclasses import replace
 
-import numpy as np
-
-from miles.rollout.generate_utils.generate_endpoint_utils import (
-    get_indexer_topk_from_response,
-    get_routed_experts_from_response,
-)
+from miles.rollout.generate_utils.generate_endpoint_utils import compute_replay_index_from_response
 from miles.rollout.generate_utils.rollout_topk_logprobs import append_rollout_topk_logprobs
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
+from miles.utils.replay_index import ReplaySegments, response_has_routed_experts, sampled_logprobs_from_meta_info
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 
@@ -124,33 +120,32 @@ def _compute_sample_from_openai_record(
     output_token_ids = [item[1] for item in choice["meta_info"]["output_token_logprobs"]]
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
 
-    sample = Sample()
     if record.request.get("return_sampling_mask", False):
-        output_log_probs = append_sampling_metadata(
-            sample,
-            output_token_ids,
+        output_log_probs = sampled_logprobs_from_meta_info(
             choice["meta_info"],
+            support_logprobs=record.request.get("sampling_logprobs_mode") == "support",
+            num_output_tokens=len(output_token_ids),
             aborted=finish_reason == "abort",
-            sampling_logprobs_mode=record.request.get("sampling_logprobs_mode", "selected"),
         )
+
+    sample = Sample()
     sample.tokens = prompt_token_ids + output_token_ids
     sample.rollout_log_probs = output_log_probs
     sample.response = tokenizer.decode(output_token_ids)
     sample.response_length = len(output_token_ids)
     sample.loss_mask = [1] * len(output_token_ids)
-    if not evaluation and (
-        record.request.get("top_logprobs") or record.request.get("sampling_logprobs_mode") == "support"
-    ):
-        append_rollout_topk_logprobs(
-            sample,
-            choice["meta_info"],
-            args.rollout_top_logprobs_num,
-            sampling_logprobs_mode=record.request.get("sampling_logprobs_mode", "selected"),
-        )
-    sample.rollout_routed_experts = (
-        None if use_addition_r3 else get_routed_experts_from_response(args, choice, len(sample.tokens) - 1)
+    if not evaluation and record.request.get("top_logprobs"):
+        append_rollout_topk_logprobs(sample, choice["meta_info"], args.rollout_top_logprobs_num)
+    sample.replay_index = compute_replay_index_from_response(
+        args,
+        request=record.request,
+        meta_info=choice["meta_info"],
+        # Additional R3 rows are assembled across records once the merged prefix is known.
+        routed_experts_rows=None if use_addition_r3 else len(sample.tokens) - 1,
+        indexer_topk_rows=len(sample.tokens) - 1,
+        num_output_tokens=len(output_token_ids),
+        aborted=finish_reason == "abort",
     )
-    sample.rollout_indexer_topk = get_indexer_topk_from_response(args, choice, sample)
     sample.weight_versions = [WeightVersionsPerCall.from_meta_info(choice["meta_info"], output_end=len(sample.tokens))]
 
     if trim_count > 0:
@@ -178,21 +173,20 @@ def merge_samples_with_addition_r3(
     records: list[SessionRecord],
     tokenizer,
 ) -> Sample:
-    """Merge ordinary fields, then materialize the required append-only R3 prefix."""
+    """Merge ordinary fields, then index the required append-only R3 prefix."""
     merged = merge_samples(samples, tokenizer)
-    if all(record.response["choices"][0]["meta_info"].get("routed_experts") is None for record in records):
+    if not any(response_has_routed_experts(record.response["choices"][0]["meta_info"]) for record in records):
         return merged
 
     required_rows = len(merged.tokens) - 1
     covered_rows = 0
-    chunks: list[np.ndarray] = []
+    chunks: list[ReplaySegments] = []
     for i, record in enumerate(records):
         if chunks and covered_rows >= required_rows:
             break
 
-        choice = record.response["choices"][0]
-        info = choice["meta_info"].get("routed_experts")
-        if info is None:
+        meta_info = record.response["choices"][0]["meta_info"]
+        if not response_has_routed_experts(meta_info):
             raise ValueError(f"additional R3: record {i} has no routed_experts payload")
 
         start = record.request.get("routed_experts_start_len")
@@ -201,15 +195,20 @@ def merge_samples_with_addition_r3(
         if start != covered_rows:
             raise ValueError(f"additional R3: record {i} starts at row {start}; expected {covered_rows}")
 
-        end = len(record.request["input_ids"]) + len(choice["meta_info"]["output_token_logprobs"]) - 1
+        end = len(record.request["input_ids"]) + len(meta_info["output_token_logprobs"]) - 1
         if end < start:
             raise ValueError(f"additional R3: record {i} has invalid offsets (start={start}, end={end})")
-        delta_rows = end - start
-        if bool(info) != bool(delta_rows):
-            raise ValueError(f"additional R3: record {i} payload presence does not match {delta_rows} rows")
 
-        patch = get_routed_experts_from_response(args, choice, delta_rows)
-        if len(patch) or required_rows == 0:
+        patch = compute_replay_index_from_response(
+            args,
+            # Only the added R3 rows are indexed here; the turn's other fields are already on its sample.
+            request={key: value for key, value in record.request.items() if key != "return_sampling_mask"},
+            meta_info=meta_info,
+            routed_experts_rows=end - start,
+            indexer_topk_rows=None,
+            num_output_tokens=len(meta_info["output_token_logprobs"]),
+        ).routed_experts
+        if patch.num_rows or required_rows == 0:
             chunks.append(patch)
         covered_rows = end
 
@@ -218,7 +217,8 @@ def merge_samples_with_addition_r3(
             f"additional R3 covers {covered_rows} rows but the merged sample needs "
             f"{required_rows} (len(tokens) - 1)"
         )
-    merged.rollout_routed_experts = np.concatenate(chunks)[:required_rows]
+    routed_experts = chunks[0].concat(*chunks[1:]).prefix(required_rows)
+    merged.replay_index = replace(merged.replay_index, routed_experts=routed_experts)
     return merged
 
 

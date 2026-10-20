@@ -2,19 +2,18 @@
 Utils to integrate SGLang's `/generate` endpoint with RL things like Sample.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
-
-import numpy as np
-import pybase64
 
 from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
     configure_rollout_topk_logprobs_request,
 )
-from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
+from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 from miles.utils.processing_utils import encode_image_for_rollout_engine, extract_multimodal_train_inputs
+from miles.utils.replay_index import ReplayIndex, sampled_logprobs_from_meta_info
 from miles.utils.types import Sample
 
 
@@ -107,13 +106,14 @@ async def update_sample_from_response(
         new_response_tokens, new_response_log_probs = [], []
 
     if payload.get("return_sampling_mask", False):
-        new_response_log_probs = append_sampling_metadata(
-            sample,
-            new_response_tokens,
+        new_response_log_probs = sampled_logprobs_from_meta_info(
             output["meta_info"],
-            sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
+            support_logprobs=payload.get("sampling_logprobs_mode") == "support",
+            num_output_tokens=len(new_response_tokens),
+            aborted=False,
         )
 
+    previous_response_length = sample.response_length
     # Update sample with tokens directly - avoiding re-tokenization
     sample.tokens = sample.tokens + new_response_tokens
     sample.response_length += len(new_response_tokens)
@@ -122,61 +122,49 @@ async def update_sample_from_response(
     if sample.rollout_log_probs is None:
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
-    if payload.get("top_logprobs_num") or payload.get("sampling_logprobs_mode") == "support":
-        append_rollout_topk_logprobs(
-            sample,
-            output["meta_info"],
-            args.rollout_top_logprobs_num,
-            sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
-        )
+    if payload.get("top_logprobs_num"):
+        append_rollout_topk_logprobs(sample, output["meta_info"], args.rollout_top_logprobs_num)
 
     if update_loss_mask:
         if sample.loss_mask is None:
             sample.loss_mask = []
         sample.loss_mask += [1] * len(new_response_tokens)
 
-    # TODO handle multi-turn cases (may need concat instead of assignment)
-    sample.rollout_routed_experts = get_routed_experts_from_response(args, output, len(sample.tokens) - 1)
-    sample.rollout_indexer_topk = get_indexer_topk_from_response(args, output, sample)
+    replay_index = compute_replay_index_from_response(
+        args,
+        request=payload,
+        meta_info=output["meta_info"],
+        routed_experts_rows=len(sample.tokens) - 1,
+        indexer_topk_rows=len(sample.tokens) - 1,
+        num_output_tokens=len(new_response_tokens),
+    )
+    sample.replay_index = sample.replay_index.append_response(replay_index, response_length=previous_response_length)
 
     # TODO may unify (currently there are both methods inside Sample and separate functions)
     sample.update_from_meta_info(args, output["meta_info"])
 
 
-def _decode_topk_buffer(info: str, num_tokens: int, num_layers: int, topk: int) -> np.ndarray:
-    # validate=True: SGLang sends plain base64; pybase64 skips its slow non-alphabet filtering pass.
-    x = np.frombuffer(pybase64.b64decode(info, validate=True), dtype=np.int32)
-    if num_tokens <= 0:
-        return np.empty((0, num_layers, max(0, topk)), dtype=np.int32)
-    if topk == -1:  # indexer: topk dim recovered from buffer length
-        topk = len(x) // (num_tokens * num_layers)
-    return x.reshape(num_tokens, num_layers, topk)
-
-
-def get_routed_experts_from_response(args, output, num_tokens: int):
-    info = output["meta_info"].get("routed_experts")
-    if info is None:
-        return None
-    routed_experts = _decode_topk_buffer(info, num_tokens, args.num_layers, -1)
-    assert routed_experts.size == 0 or routed_experts.any(), (
-        "routed_experts payload is all zeros: the sglang engine did not capture routed experts "
-        "(topk-bypassing --moe-runner-backend such as flashinfer_trtllm?)."
+def compute_replay_index_from_response(
+    config,
+    *,
+    request: Mapping[str, Any],
+    meta_info: Mapping[str, Any],
+    routed_experts_rows: int | None,
+    indexer_topk_rows: int | None,
+    num_output_tokens: int,
+    aborted: bool = False,
+    allow_extra_routed_experts_row: bool = False,
+) -> ReplayIndex:
+    """Parse one response's replay fields; ``config`` is the run args or the session server config."""
+    return ReplayIndex.from_meta_info(
+        meta_info,
+        routed_experts_rows=routed_experts_rows,
+        num_layers=getattr(config, "num_layers", None),
+        indexer_topk_rows=indexer_topk_rows,
+        indexer_num_streams=getattr(config, "rollout_indexer_topk_num_streams", None),
+        return_sampling_mask=bool(request.get("return_sampling_mask")),
+        support_logprobs=request.get("sampling_logprobs_mode") == "support",
+        num_output_tokens=num_output_tokens,
+        aborted=aborted,
+        allow_extra_routed_experts_row=allow_extra_routed_experts_row,
     )
-    return routed_experts
-
-
-def get_indexer_topk_from_response(args, output, sample):
-    info = output["meta_info"].get("indexer_topk")
-    if info is None:
-        return None
-    num_layers = output["meta_info"].get("indexer_topk_num_layers")
-    assert num_layers is not None, (
-        "Server returned indexer_topk without indexer_topk_num_layers; "
-        "sglang-miles must include the layer count in meta_info."
-    )
-    expected_num_streams = getattr(args, "rollout_indexer_topk_num_streams", None)
-    assert expected_num_streams is None or num_layers == expected_num_streams, (
-        f"Server returned indexer_topk with {num_layers} streams but the model has "
-        f"{expected_num_streams} indexer layers; replaying it would map streams to the wrong layers."
-    )
-    return _decode_topk_buffer(info, len(sample.tokens) - 1, num_layers, -1)

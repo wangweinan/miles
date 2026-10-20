@@ -61,17 +61,17 @@ SGLang reports three kinds of log probability:
 
 | SGLang field | Distribution | Filtered | Sums to 1 on the support |
 | --- | --- | --- | --- |
-| `output_token_sampling_logprobs` (selected or support mode) | `q'`: renormalized after top-k/top-p filtering | yes | yes |
+| `output_token_sampling_logprobs` (selected or support mode), `output_token_sampling_selected_logprobs` (support mode) | `q'`: renormalized after top-k/top-p filtering | yes | yes |
 | `output_token_logprobs`, `output_top_logprobs` | `p_T = softmax(logits / T)` over the full vocabulary | no | no, less than 1 under filtering |
 | `output_token_logprobs`, `output_top_logprobs` with `SGLANG_RETURN_ORIGINAL_LOGPROB=1` | `log_softmax(logits)`, without the temperature | no | — |
 
 The first row is the sampler under filtering and the second the sampler without filtering. Miles-managed rollout workers set `SGLANG_RETURN_ORIGINAL_LOGPROB=0`, so the third row does not occur. Each configuration reads:
 
-| Configuration | Sampling-support replay (`append_sampling_metadata`) | Candidates (`append_rollout_topk_logprobs`) | SGLang source |
+| Configuration | Sampling mask | Candidates | SGLang source |
 | --- | --- | --- | --- |
-| Sampling-support replay only (`--rollout-top-logprobs-num 0`) | stores the support; returns the sampled-token log probability | nothing (`K = 0`) | `output_token_sampling_mask`, `output_token_sampling_logprobs` |
-| Score centering, unfiltered | not called (no `return_sampling_mask`) | stores the top `K` candidates | `output_top_logprobs` |
-| Score centering, filtered | stores the support; picks the sampled-token log probability from its row | stores `[n, K]`: the same support IDs with their row log probabilities | both read the same `output_token_sampling_mask`, `output_token_sampling_logprobs` |
+| Sampling-support replay only (`--rollout-top-logprobs-num 0`) | the support; the rollout keeps the sampled-token log probability | nothing (`K = 0`) | `output_token_sampling_mask`, `output_token_sampling_logprobs` |
+| Score centering, unfiltered | not requested (no `return_sampling_mask`) | the rollout stores the top `K` candidates | `output_top_logprobs` |
+| Score centering, filtered | the support with its row log probabilities; the rollout keeps the sampled-token log probability | the trainer builds `[n, K]` from the same support IDs and row log probabilities | `output_token_sampling_mask`, `output_token_sampling_logprobs`, `output_token_sampling_selected_logprobs` |
 
 For support replay without reference KL, the trainer gathers only sampled and support logits, normalizes over that support, and saves activations proportional to the candidate count rather than the vocabulary size. Other paths retain full-vocabulary normalization, reducing normalization scalars and selected logits across tensor-parallel ranks. It excludes padded vocabulary entries and computes probabilities in float32 for BF16/FP16 models. `--log-probs-chunk-size` controls the temporary computation size; `--recompute-loss-function` can trade computation for saved activations. No full vocabulary is gathered across ranks.
 
@@ -82,6 +82,8 @@ Native SGLang generation, the legacy rollout path, and both session-server versi
 - `rollout_topk_token_ids`: int32 array shaped `[response_length, k]`.
 - `rollout_topk_log_probs`: float32 array of the same shape.
 - `rollout_log_probs`: the actual sampled-token log probabilities.
+
+In support mode the trainer builds the two candidate arrays from the sampling mask, so rollout `Sample`s carry only `rollout_log_probs`.
 
 Evaluation requests skip this collection and may use independent sampling settings, including greedy decoding. The built-in agentic producer marks evaluation sessions when creating them; custom session clients should create them with `POST /sessions` with JSON body `{"evaluation": true}`.
 

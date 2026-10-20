@@ -32,7 +32,6 @@ def expected_sample(*, group_index: int | None) -> Sample:
         loss_mask=None,
         weight_versions=[WeightVersionsPerCall(spans=[], output_start=7, prompt_tokens=7)],
         rollout_log_probs=[-0.0, -0.0078125, -0.015625, -0.0234375, -0.03125],
-        rollout_routed_experts=None,
         remove_sample=False,
         status=Sample.Status.COMPLETED,
         metadata={},

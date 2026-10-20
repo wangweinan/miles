@@ -16,6 +16,23 @@ from miles.rollout.session.samples.merge import compute_samples_from_openai_reco
 from miles.rollout.session.types import SessionRecord
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
+
+def _r3(sample: Sample):
+    """The sample's materialized R3 rows; inline in these tests, so no store read is needed."""
+    routed_experts = sample.replay_index.routed_experts
+    return None if routed_experts is None else routed_experts.materialize_rows({})
+
+
+def _mask_csr(sample: Sample) -> tuple[list[int], list[int]]:
+    import numpy as np
+
+    from miles.backends.training_utils.data.replay import derive_sampling_mask
+
+    response = np.asarray(sample.tokens[len(sample.tokens) - sample.response_length :], dtype=np.int64)
+    derived = derive_sampling_mask(sample.replay_index.sampling_mask.mask_pieces({}), response)
+    return derived.ids.tolist(), derived.offsets.tolist()
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 _ARGS = SimpleNamespace(save_debug_trajectory_data=None, sglang_speculative_algorithm=None)
@@ -241,10 +258,13 @@ class TestComputeSamplesFromRecords:
 
         (sample,) = compute_samples_from_openai_records(_ARGS, [record], tok)
 
-        assert sample.rollout_log_probs == [-0.5, -0.6]
-        ids, offsets = sample.rollout_sampling_mask._as_tensors()
-        assert ids.tolist() == [10, 4, 7, 11, 3]
-        assert offsets.tolist() == [0, 3, 5]
+        # The sampling log-probs replace output_token_logprobs; the mask holds only the supports.
+        assert sample.rollout_log_probs == pytest.approx([-0.5, -0.6])
+        (piece,) = sample.replay_index.sampling_mask.mask_pieces({})
+        assert piece.logprobs is None
+        ids, offsets = _mask_csr(sample)
+        assert ids == [10, 4, 7, 11, 3]
+        assert offsets == [0, 3, 5]
         sample.validate()
 
     def test_abort_without_sampling_metadata_is_non_trainable(self):
@@ -256,14 +276,14 @@ class TestComputeSamplesFromRecords:
 
         assert sample.status == Sample.Status.ABORTED
         assert sample.reward is None
-        assert len(sample.rollout_sampling_mask) == 0
+        assert sample.replay_index.sampling_mask.num_rows == 0
 
     def test_successful_turn_still_requires_sampling_metadata(self):
         tok = _mock_tokenizer()
         record = _make_record(prompt_token_ids=[1, 2, 3], output_token_ids=[10])
         record.request["return_sampling_mask"] = True
 
-        with pytest.raises(ValueError, match="missing output_token_sampling_mask"):
+        with pytest.raises(ValueError, match="missing output_token_sampling_"):
             compute_samples_from_openai_records(_ARGS, [record], tok)
 
     def test_later_abort_preserves_terminal_status(self):
@@ -284,7 +304,7 @@ class TestComputeSamplesFromRecords:
 
         assert merged.status == Sample.Status.ABORTED
         assert merged.tokens == [1, 2, 10, 20]
-        assert len(merged.rollout_sampling_mask) == merged.response_length == 2
+        assert merged.replay_index.sampling_mask.num_rows == merged.response_length == 2
 
     def test_multiple_records_produce_multiple_samples(self):
         tok = _mock_tokenizer()
@@ -847,9 +867,9 @@ class TestAdditionR3Assembly:
         assert merged_addition.tokens == merged_full.tokens == accumulated
         assert merged_addition.loss_mask == merged_full.loss_mask
         assert merged_addition.rollout_log_probs == merged_full.rollout_log_probs
-        assert merged_addition.rollout_routed_experts.dtype == np.int32
-        assert np.array_equal(merged_addition.rollout_routed_experts, merged_full.rollout_routed_experts)
-        assert np.array_equal(merged_addition.rollout_routed_experts, full)
+        assert _r3(merged_addition).dtype == np.int32
+        assert np.array_equal(_r3(merged_addition), _r3(merged_full))
+        assert np.array_equal(_r3(merged_addition), full)
 
     def test_patch_that_is_not_plain_base64_raises(self):
         """SGLang sends plain base64; any other character fails the decode instead of being dropped from it."""
@@ -896,7 +916,7 @@ class TestAdditionR3Assembly:
         assert merged.status == Sample.Status.TRUNCATED
         assert merged.tokens == accumulated[:8]
         expected = np.concatenate([_r3_rows(4, 0), _r3_rows(3, 16)])
-        assert np.array_equal(merged.rollout_routed_experts, expected)
+        assert np.array_equal(_r3(merged), expected)
 
     def test_missing_required_patch_raises(self):
         """A missing patch cannot silently shorten a merged trajectory."""
@@ -929,7 +949,7 @@ class TestAdditionR3Assembly:
             compute_samples_from_openai_records(_ARGS_R3, records, tok, accumulated_token_ids=accumulated), tok
         )
 
-        assert merged.rollout_routed_experts is None
+        assert merged.replay_index.routed_experts is None
         assert merged.tokens == reference.tokens
         assert merged.loss_mask == reference.loss_mask
 
@@ -940,8 +960,8 @@ class TestAdditionR3Assembly:
 
         merged = _merge_addition(records, [1])
 
-        assert merged.rollout_routed_experts.shape == (0, _ARGS_R3.num_layers, 0)
-        assert merged.rollout_routed_experts.dtype == np.int32
+        assert _r3(merged).shape == (0, _ARGS_R3.num_layers, 0)
+        assert _r3(merged).dtype == np.int32
 
     def test_missing_start_len_raises(self):
         records = [_make_record([1, 2, 3], [10, 11], routed_experts=_r3_patch(_r3_rows(4, 0)))]
@@ -952,7 +972,7 @@ class TestAdditionR3Assembly:
     def test_empty_payload_for_nonempty_delta_raises(self):
         records = [_make_record([1, 2, 3], [10, 11], routed_experts="", routed_experts_start_len=0)]
 
-        with pytest.raises(ValueError, match="payload presence does not match 4 rows"):
+        with pytest.raises(ValueError, match="cannot hold 4 rows"):
             _merge_addition(records, [1, 2, 3, 10, 11])
 
     def test_gapped_start_raises(self):

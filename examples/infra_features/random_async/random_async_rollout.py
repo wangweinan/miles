@@ -40,6 +40,7 @@ from random_async_sglang_metrics import SGLangMetricsReporter, record_agent_requ
 from miles.rollout.data_source import DataSource
 from miles.utils.async_utils import run
 from miles.utils.http_utils import post as http_post
+from miles.utils.replay_index import ReplayIndex
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ async def _generate_one_random_sample(args, sample: Sample) -> Sample:
                 f"(sample_index={sample.index}, routed_experts={routed_experts.shape[0]}, "
                 f"tokens_minus_one={len(current_ids) - 1})"
             )
-        sample.rollout_routed_experts = routed_experts
+        sample.replay_index = ReplayIndex.from_arrays(routed_experts=routed_experts)
     sample.status = Sample.Status.COMPLETED
     print(
         f"Random rollout sample finished: group={sample.group_index}, "

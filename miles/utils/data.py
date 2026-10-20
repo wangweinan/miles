@@ -300,6 +300,7 @@ def process_rollout_data(
     train_parallel_config: TrainParallelConfig,
     witness_info: WitnessInfo | None,
 ) -> tuple[dict, object_store.ObjectStoreGetResult]:
+    from miles.backends.training_utils.data.replay import materialize_replay_columns
     from miles.ray.rollout.train_data_conversion import process_rollout_data_shard
 
     store = object_store.get_instance()
@@ -324,6 +325,8 @@ def process_rollout_data(
         get_result = store.get(rollout_data_ref[dp_rank])
         rollout_data = dict(get_result.value)
 
+    # Reads this attempt's shard from scratch, so an FT retry with another DP split reads again.
+    materialize_replay_columns(args, rollout_data)
     return process_rollout_data_shard(args, rollout_data), get_result
 
 

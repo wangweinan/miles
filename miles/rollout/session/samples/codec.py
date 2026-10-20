@@ -13,9 +13,8 @@ from copy import copy, deepcopy
 
 import numpy as np
 import safetensors.numpy
-import torch
 
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.replay_index import INLINE_TRAIN_COLUMNS, ReplayIndex, stored_field_names
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 
@@ -23,7 +22,7 @@ from miles.utils.types import Sample, WeightVersionsPerCall
 class ValueSpec:
     """Wire contract of one computed field."""
 
-    codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "json"
+    codec: str  # "tensor" | "tensor_list" | "replay_index" | "json"
     dtype: np.dtype | None = None  # tensor codecs: pinned on both sides; a mismatch raises instead of converting
     strict: bool = False  # encode never converts, only validates (R3 replay tensors must arrive as int32)
     null: object = None  # decoded value for a null-marked field; copied per sample so no instance is shared
@@ -39,9 +38,8 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "rollout_log_probs": ValueSpec("tensor_list", np.dtype(np.float64)),
     "rollout_topk_token_ids": ValueSpec("tensor", np.dtype(np.int32), strict=True),
     "rollout_topk_log_probs": ValueSpec("tensor", np.dtype(np.float32), strict=True),
-    "rollout_sampling_mask": ValueSpec("sampling_mask"),
-    "rollout_routed_experts": ValueSpec("tensor", np.dtype(np.int32), strict=True),
-    "rollout_indexer_topk": ValueSpec("tensor", np.dtype(np.int32), strict=True),
+    # R3, indexer top-k and sampling mask: the descriptor rides in the JSON meta, inline rows as tensors.
+    "replay_index": ValueSpec("replay_index"),
     "status": ValueSpec("json"),
     "weight_versions": ValueSpec("json"),
     "spec_info": ValueSpec("json"),
@@ -55,18 +53,18 @@ SAMPLES_VALUE_SPEC_V2: dict[str, ValueSpec] = {
     "reward": ValueSpec("json"),
 }
 
-ROLLOUT_SAMPLING_MASK_FIELDS = ("rollout_sampling_mask",)
-
 # The wire allowlists, derived: only table fields cross the samples wire.
-COMPUTED_FIELDS = tuple(field for field in SAMPLES_VALUE_SPEC if field not in ROLLOUT_SAMPLING_MASK_FIELDS)
-COMPUTED_FIELDS_V2 = tuple(field for field in SAMPLES_VALUE_SPEC_V2 if field not in ROLLOUT_SAMPLING_MASK_FIELDS)
+COMPUTED_FIELDS = tuple(SAMPLES_VALUE_SPEC)
+COMPUTED_FIELDS_V2 = tuple(SAMPLES_VALUE_SPEC_V2)
 
 assert all(
-    spec.codec in ("tensor", "tensor_list", "sampling_mask", "json") for spec in SAMPLES_VALUE_SPEC_V2.values()
+    spec.codec in ("tensor", "tensor_list", "replay_index", "json") for spec in SAMPLES_VALUE_SPEC_V2.values()
 ), "unknown codec in SAMPLES_VALUE_SPEC"
 
-_TENSOR_FIELDS = frozenset(field for field, spec in SAMPLES_VALUE_SPEC_V2.items() if spec.codec != "json")
-assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
+_TENSOR_FIELDS = frozenset(
+    field for field, spec in SAMPLES_VALUE_SPEC_V2.items() if spec.codec in ("tensor", "tensor_list")
+)
+assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS)
 
 _SAMPLES_META_KEY = "_samples_meta"
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
@@ -94,7 +92,7 @@ def _asarray_wire(field: str, value, dtype: np.dtype) -> np.ndarray:
     return converted
 
 
-# safetensors dtype names of every wire dtype in SAMPLES_VALUE_SPEC_V2 (incl. sampling-mask ids/offsets).
+# safetensors dtype names of every wire dtype in SAMPLES_VALUE_SPEC_V2 (incl. the replay index's inline rows).
 # TODO: add "I16": np.int16 for #4035's int16 routed experts (past 256 experts), whichever lands second.
 _WIRE_DTYPES = {"I64": np.int64, "I32": np.int32, "U8": np.uint8, "F64": np.float64, "F32": np.float32}
 
@@ -158,18 +156,19 @@ def encode_samples(
                     value = value.to_dict()
                 sample_meta[field] = value
                 continue
+            if spec.codec == "replay_index":
+                descriptor, arrays = value.to_wire()
+                sample_meta[field] = descriptor
+                for stored, array in arrays.items():
+                    if array.dtype != (dtype := INLINE_TRAIN_COLUMNS[stored][1]):
+                        raise ValueError(f"{field}.{stored} must have dtype {dtype}, got {array.dtype}")
+                    tensors[f"{field}.{stored}.{sample_index}"] = np.ascontiguousarray(array)
+                continue
             if value is None:
                 # Preserve the existing wire format when rollout top-k logprobs collection is disabled.
                 if field in _ROLLOUT_TOPK_LOGPROBS_FIELDS:
                     continue
                 nulls.append(field)
-                continue
-            if spec.codec == "sampling_mask":
-                if not isinstance(value, RolloutSamplingMask):
-                    raise TypeError(f"{field} must be a RolloutSamplingMask, got {type(value).__name__}")
-                ids, offsets = value._as_tensors()
-                tensors[f"{field}.ids.{sample_index}"] = np.ascontiguousarray(ids.numpy())
-                tensors[f"{field}.offsets.{sample_index}"] = np.ascontiguousarray(offsets.numpy())
                 continue
             if spec.strict:
                 arr = np.asarray(value)
@@ -196,9 +195,8 @@ def decode_samples_and_merge_input_sample(
 
     ``fields`` must match the server's encode allowlist (v1 default); extra
     keys a newer server sent are ignored, so a v1 decode of a v2 payload
-    keeps exactly the v1 overlay semantics. R3 and top-k tensor fields are
-    views of the payload buffer (see ``_load_tensor_views``); a sampling mask
-    copies its ids and offsets.
+    keeps exactly the v1 overlay semantics. Top-k tensor fields and the replay
+    index's inline rows are views of the payload buffer (see ``_load_tensor_views``).
     """
     tensors = _load_tensor_views(payload)  # ValueError/KeyError propagate: invalid container
     meta_arr = tensors.pop(_SAMPLES_META_KEY)  # KeyError propagates: missing meta is malformed
@@ -239,6 +237,9 @@ def decode_samples_and_merge_input_sample(
                     continue
                 setattr(sample, field, value)
                 continue
+            if spec.codec == "replay_index":
+                setattr(sample, field, _decode_replay_index(sample_meta[field], tensors, sample_index=sample_index))
+                continue
             if field in nulls:
                 setattr(sample, field, copy(spec.null))
                 continue
@@ -246,19 +247,6 @@ def decode_samples_and_merge_input_sample(
                 # Older producers have no candidate fields; training validates
                 # their presence when the new loss is actually selected.
                 setattr(sample, field, None)
-                continue
-            if spec.codec == "sampling_mask":
-                ids = tensors.pop(f"{field}.ids.{sample_index}")
-                offsets = tensors.pop(f"{field}.offsets.{sample_index}")
-                if ids.dtype != np.int32 or offsets.dtype != np.int64:
-                    raise ValueError(
-                        f"{field} must use int32 ids and int64 offsets, got {ids.dtype} and {offsets.dtype}"
-                    )
-                setattr(
-                    sample,
-                    field,
-                    RolloutSamplingMask(ids=torch.from_numpy(ids), offsets=torch.from_numpy(offsets)),
-                )
                 continue
             arr = tensors.pop(f"{field}.{sample_index}")  # KeyError propagates: a promised tensor must exist
             if arr.dtype != spec.dtype:
@@ -268,6 +256,17 @@ def decode_samples_and_merge_input_sample(
     if tensors:
         raise ValueError(f"payload carries unreferenced tensors: {sorted(tensors)}")
     return SamplesReply(samples=samples, session_metadata=meta["session_metadata"], empty_reason=meta["empty_reason"])
+
+
+def _decode_replay_index(descriptor: dict, tensors: dict[str, np.ndarray], *, sample_index: int) -> ReplayIndex:
+    arrays = {}
+    for name in descriptor:
+        for stored in stored_field_names(name):
+            if (array := tensors.pop(f"replay_index.{stored}.{sample_index}", None)) is not None:
+                if array.dtype != (dtype := INLINE_TRAIN_COLUMNS[stored][1]):
+                    raise ValueError(f"replay_index.{stored} must have dtype {dtype}, got {array.dtype}")
+                arrays[stored] = array
+    return ReplayIndex.from_wire(descriptor, arrays)
 
 
 def assert_input_sample_defaults(input_sample: Sample) -> None:

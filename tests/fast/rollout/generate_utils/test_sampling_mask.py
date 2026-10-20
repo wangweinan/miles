@@ -1,16 +1,32 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from miles.backends.training_utils.data.replay import derive_sampling_mask
 from miles.rollout.generate_utils.generate_endpoint_utils import compute_request_payload
-from miles.rollout.generate_utils.sampling_mask import (
-    append_forced_sampling_tokens,
-    append_sampling_metadata,
-    merge_sampling_masks,
-    should_return_sampling_mask,
-)
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
+from miles.utils.replay_index import ReplayDataError, ReplayIndex, sampled_logprobs_from_meta_info
 from miles.utils.types import Sample
+
+
+def _parse_mask(meta_info: dict, num_output_tokens: int, *, support: bool = False) -> ReplayIndex:
+    return ReplayIndex.from_meta_info(
+        meta_info,
+        routed_experts_rows=None,
+        num_layers=None,
+        indexer_topk_rows=None,
+        indexer_num_streams=None,
+        return_sampling_mask=True,
+        support_logprobs=support,
+        num_output_tokens=num_output_tokens,
+        aborted=False,
+    )
+
+
+def _derive(index: ReplayIndex, sampled: list[int], *, support: bool = False):
+    pieces = index.sampling_mask.mask_pieces({})
+    return derive_sampling_mask(pieces, np.asarray(sampled, dtype=np.int64))
 
 
 @pytest.mark.parametrize(
@@ -148,104 +164,103 @@ def test_training_request_rejects_unreplayed_logit_transform(name, value):
         )
 
 
-def test_append_sampling_metadata_preserves_ragged_support_and_native_logprobs():
-    sample = Sample(tokens=[1, 2])
+def test_sampling_mask_preserves_ragged_support_and_native_logprobs():
     meta_info = {
         "output_token_sampling_mask": [[10, 4, 7], [11, 3]],
         "output_token_sampling_logprobs": [-0.25, -0.5],
     }
-
-    log_probs = append_sampling_metadata(sample, [10, 11], meta_info)
-    sample.tokens.extend([10, 11])
-    sample.response_length = 2
-
-    assert log_probs == [-0.25, -0.5]
-    ids, offsets = sample.rollout_sampling_mask._as_tensors()
-    assert ids.tolist() == [10, 4, 7, 11, 3]
-    assert offsets.tolist() == [0, 3, 5]
+    index = _parse_mask(meta_info, 2)
+    sample = Sample(tokens=[1, 2, 10, 11], response_length=2, replay_index=index)
     sample.validate()
 
+    # Selected mode: the per-token log-probs are the rollout's, not part of the mask.
+    assert sampled_logprobs_from_meta_info(meta_info, support_logprobs=False, num_output_tokens=2, aborted=False) == [
+        -0.25,
+        -0.5,
+    ]
+    derived = _derive(index, [10, 11])
+    assert derived.support_logprobs is None
+    assert derived.ids.tolist() == [10, 4, 7, 11, 3]
+    assert derived.offsets.tolist() == [0, 3, 5]
 
-def test_append_sampling_metadata_selects_sampled_probability_from_support_mode():
-    sample = Sample(tokens=[1])
+
+def test_support_mode_keeps_support_logprobs_and_returns_sampled_ones_inline():
     meta_info = {
         "output_token_sampling_mask": [[10, 4, 7], [11, 3]],
         "output_token_sampling_logprobs": [[-1.2, -0.6, -2.0], [-0.4, -1.1]],
+        "output_token_sampling_selected_logprobs": [-0.6, -0.4],
     }
+    index = _parse_mask(meta_info, 2, support=True)
 
-    log_probs = append_sampling_metadata(sample, [4, 11], meta_info, sampling_logprobs_mode="support")
+    assert sampled_logprobs_from_meta_info(
+        meta_info, support_logprobs=True, num_output_tokens=2, aborted=False
+    ) == pytest.approx([-0.6, -0.4])
+    derived = _derive(index, [4, 11], support=True)
+    np.testing.assert_array_equal(derived.support_logprobs, np.float32([-1.2, -0.6, -2.0, -0.4, -1.1]))
+    assert derived.ids.tolist() == [10, 4, 7, 11, 3]
+    assert derived.offsets.tolist() == [0, 3, 5]
 
-    assert log_probs == [-0.6, -0.4]
-    ids, offsets = sample.rollout_sampling_mask._as_tensors()
-    assert ids.tolist() == [10, 4, 7, 11, 3]
-    assert offsets.tolist() == [0, 3, 5]
 
-
-def test_append_sampling_metadata_rejects_misaligned_support_logprobs():
-    sample = Sample(tokens=[1])
+def test_sampling_mask_rejects_misaligned_support_logprobs():
     meta_info = {
         "output_token_sampling_mask": [[10, 4]],
         "output_token_sampling_logprobs": [[-0.5]],
     }
 
-    with pytest.raises(ValueError, match="align"):
-        append_sampling_metadata(sample, [4], meta_info, sampling_logprobs_mode="support")
+    with pytest.raises(ReplayDataError, match="align"):
+        _parse_mask(meta_info, 1, support=True)
 
 
 def test_forced_tokens_append_singleton_support_and_strip_cleanly():
-    sample = Sample(
-        tokens=[1, 10],
-        response_length=1,
-        rollout_sampling_mask=RolloutSamplingMask(ids=[10, 4], offsets=[0, 2]),
-    )
+    index = _parse_mask({"output_token_sampling_mask": [[10, 4]], "output_token_sampling_logprobs": [-0.1]}, 1)
+    sample = Sample(tokens=[1, 10], response_length=1, replay_index=index)
 
-    append_forced_sampling_tokens(sample, [20, 21])
+    sample.replay_index = sample.replay_index.append_forced_tokens(2, response_length=sample.response_length)
     sample.tokens.extend([20, 21])
     sample.response_length += 2
     sample.validate()
 
-    ids, offsets = sample.rollout_sampling_mask._as_tensors()
-    assert ids.tolist() == [10, 4, 20, 21]
-    assert offsets.tolist() == [0, 2, 3, 4]
+    derived = _derive(sample.replay_index, [10, 20, 21])
+    assert derived.ids.tolist() == [10, 4, 20, 21]
+    assert derived.offsets.tolist() == [0, 2, 3, 4]
+    assert derived.forced.tolist() == [False, True, True]
 
     tokenizer = type("Tokenizer", (), {"decode": staticmethod(lambda _: "")})()
     sample.strip_last_output_tokens(2, tokenizer)
-    ids, offsets = sample.rollout_sampling_mask._as_tensors()
-    assert ids.tolist() == [10, 4]
-    assert offsets.tolist() == [0, 2]
+    derived = _derive(sample.replay_index, [10])
+    assert derived.ids.tolist() == [10, 4]
+    assert derived.offsets.tolist() == [0, 2]
 
 
-def test_merge_sampling_masks_inserts_singleton_observation_supports():
-    first = Sample(
-        response_length=1,
-        rollout_sampling_mask=RolloutSamplingMask(ids=[10, 4], offsets=[0, 2]),
-    )
-    second = Sample(
-        response_length=1,
-        rollout_sampling_mask=RolloutSamplingMask(ids=[30, 7, 8], offsets=[0, 3]),
-    )
+def test_merge_turn_inserts_singleton_observation_supports():
+    first = _parse_mask({"output_token_sampling_mask": [[10, 4]], "output_token_sampling_logprobs": [-0.1]}, 1)
+    second = _parse_mask({"output_token_sampling_mask": [[30, 7, 8]], "output_token_sampling_logprobs": [-0.2]}, 1)
 
-    sampling_mask = merge_sampling_masks(first, [20, 21], second)
-    ids, offsets = sampling_mask._as_tensors()
+    merged = first.merge_turn(second, observation_tokens=2)
+    derived = _derive(merged, [10, 20, 21, 30])
 
-    assert ids.tolist() == [10, 4, 20, 21, 30, 7, 8]
-    assert offsets.tolist() == [0, 2, 3, 4, 7]
+    assert derived.ids.tolist() == [10, 4, 20, 21, 30, 7, 8]
+    assert derived.offsets.tolist() == [0, 2, 3, 4, 7]
 
 
-def test_append_sampling_metadata_rejects_support_without_sampled_token():
-    with pytest.raises(ValueError, match="sampled token 10 is absent"):
-        append_sampling_metadata(
-            Sample(),
-            [10],
-            {
-                "output_token_sampling_mask": [[4, 7]],
-                "output_token_sampling_logprobs": [-0.25],
-            },
-        )
+def test_sampling_mask_rejects_support_without_sampled_token():
+    index = _parse_mask({"output_token_sampling_mask": [[4, 7]], "output_token_sampling_logprobs": [-0.25]}, 1)
+
+    with pytest.raises(ReplayDataError, match="sampled token 10 is absent"):
+        _derive(index, [10])
 
 
 def test_abort_before_sampling_does_not_require_sampling_metadata():
-    sample = Sample()
+    index = ReplayIndex.from_meta_info(
+        {"finish_reason": {"type": "abort"}},
+        routed_experts_rows=None,
+        num_layers=None,
+        indexer_topk_rows=None,
+        indexer_num_streams=None,
+        return_sampling_mask=True,
+        support_logprobs=False,
+        num_output_tokens=0,
+        aborted=False,
+    )
 
-    assert append_sampling_metadata(sample, [], {"finish_reason": {"type": "abort"}}) == []
-    assert len(sample.rollout_sampling_mask) == 0
+    assert index.sampling_mask.num_rows == 0

@@ -121,12 +121,12 @@ def validate_samples(samples, specs, sessions):
         assert sample.metadata["agent_metrics"]["turns_ok"] == len(specs)
         assert sample.tokens == expected_tokens
         assert sample.reward == 1.0
-        assert sample.rollout_routed_experts.shape == expected_shape
-        assert sample.rollout_routed_experts.dtype == np.int32
-        np.testing.assert_array_equal(sample.rollout_routed_experts, expected_r3)
+        assert sample.replay_index.routed_experts.materialize_rows({}).shape == expected_shape
+        assert sample.replay_index.routed_experts.materialize_rows({}).dtype == np.int32
+        np.testing.assert_array_equal(sample.replay_index.routed_experts.materialize_rows({}), expected_r3)
         assert len(sample.rollout_log_probs) == sample.response_length
         assert len(sample.loss_mask) == sample.response_length
-    return sum(sample.rollout_routed_experts.nbytes for sample in samples)
+    return sum(sample.replay_index.routed_experts.materialize_rows({}).nbytes for sample in samples)
 
 
 def close_http_client():

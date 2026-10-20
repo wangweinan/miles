@@ -222,7 +222,7 @@ async def test_assembled_samples_golden_merged(core):
             spans=[WeightVersionSpan(version="w2", abs_start=7, abs_end=9)], output_start=7, prompt_tokens=7
         ),
     ]
-    assert np.array_equal(m.rollout_routed_experts, _expected_r3(100, 8))
+    assert np.array_equal(m.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8))
     assert m.prefix_cache_info.to_dict() == {"cached_tokens": 5, "total_prompt_tokens": 10}
     # Overlay: template fields are the driver's, untouched by the wire.
     assert m.prompt == [{"role": "user", "content": "hi"}]
@@ -326,7 +326,7 @@ async def test_truncation_golden(core):
     assert last.tokens == _ACCUMULATED[:8]
     assert last.loss_mask == [1, 1, 0, 0, 1]
     assert last.rollout_log_probs == [-0.125, -0.25, 0.0, 0.0, -0.5]
-    assert np.array_equal(last.rollout_routed_experts, _expected_r3(100, 8)[:-1])
+    assert np.array_equal(last.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8)[:-1])
 
 
 async def test_session_metadata_matches_get_session(core):
@@ -386,8 +386,8 @@ async def test_addition_assembled_sample_matches_full_reference(addition_core):
     assert m.tokens == _ACCUMULATED
     assert m.loss_mask == [1, 1, 0, 0, 1, 1]
     assert m.status == Sample.Status.COMPLETED
-    assert m.rollout_routed_experts.dtype == np.int32
-    assert np.array_equal(m.rollout_routed_experts, _expected_r3(100, 8))
+    assert m.replay_index.routed_experts.materialize_rows({}).dtype == np.int32
+    assert np.array_equal(m.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8))
 
 
 async def test_addition_branched_tree_materializes_each_leaf():
@@ -437,8 +437,12 @@ async def test_addition_branched_tree_materializes_each_leaf():
         sample_a, sample_b = reply.samples
         assert sample_a.tokens == leaf_a.token_ids
         assert sample_b.tokens == leaf_b.token_ids
-        assert np.array_equal(sample_a.rollout_routed_experts, np.concatenate([shared, leaf_a_rows]))
-        assert np.array_equal(sample_b.rollout_routed_experts, np.concatenate([shared, leaf_b_rows]))
+        assert np.array_equal(
+            sample_a.replay_index.routed_experts.materialize_rows({}), np.concatenate([shared, leaf_a_rows])
+        )
+        assert np.array_equal(
+            sample_b.replay_index.routed_experts.materialize_rows({}), np.concatenate([shared, leaf_b_rows])
+        )
 
 
 async def test_addition_gap_returns_422(addition_core):

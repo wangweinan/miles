@@ -210,14 +210,14 @@ def test_tito_session_addition_r3_matches_full_r3(sglang_server):
         assert len(samples_reply.samples) == 1
         sample = samples_reply.samples[0]
         assert sample.tokens == final_token_ids
-        assert sample.rollout_routed_experts is not None
-        assert sample.rollout_routed_experts.dtype == np.int32
-        assert sample.rollout_routed_experts.shape == (
+        assert sample.replay_index.routed_experts is not None
+        assert sample.replay_index.routed_experts.materialize_rows({}).dtype == np.int32
+        assert sample.replay_index.routed_experts.materialize_rows({}).shape == (
             len(final_token_ids) - 1,
             _NUM_LAYERS,
             _ROUTED_EXPERTS_TOPK,
         )
-        assert sample.rollout_routed_experts.tobytes(order="C") == full_r3
+        assert sample.replay_index.routed_experts.materialize_rows({}).tobytes(order="C") == full_r3
 
 
 if __name__ == "__main__":

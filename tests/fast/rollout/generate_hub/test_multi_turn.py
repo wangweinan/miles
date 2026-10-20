@@ -680,9 +680,9 @@ class TestRoutedExpertsMultiTurn:
         expected_second_turn_log_probs = [-1 / 128 * i for i in range(token_len(S.SECOND_RESPONSE))]
         assert sample.rollout_log_probs is not None
         assert sample.rollout_log_probs[-len(expected_second_turn_log_probs) :] == expected_second_turn_log_probs
-        assert sample.rollout_routed_experts is not None
-        assert sample.rollout_routed_experts.shape == second_routed_experts.shape
-        np.testing.assert_array_equal(sample.rollout_routed_experts, second_routed_experts)
+        assert sample.replay_index.routed_experts is not None
+        assert sample.replay_index.routed_experts.materialize_rows({}).shape == second_routed_experts.shape
+        np.testing.assert_array_equal(sample.replay_index.routed_experts.materialize_rows({}), second_routed_experts)
         assert len(sample.tokens) - 1 == second_routed_experts.shape[0]
 
 

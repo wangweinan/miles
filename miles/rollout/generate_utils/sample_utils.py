@@ -3,17 +3,12 @@ from dataclasses import fields
 from typing import Any
 
 from miles.rollout.generate_utils.rollout_topk_logprobs import merge_rollout_topk_logprobs_field
-from miles.rollout.generate_utils.sampling_mask import merge_sampling_masks
 from miles.utils.types import Sample
 
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
 
 
-_REPLAY_FIELDS = (
-    "rollout_routed_experts",
-    "rollout_indexer_topk",
-    "rollout_sampling_mask",
-)
+_REPLAY_FIELDS = ("routed_experts", "indexer_topk", "sampling_mask")
 
 
 def merge_samples(samples: list[Sample], tokenizer) -> Sample:
@@ -32,7 +27,10 @@ def merge_samples(samples: list[Sample], tokenizer) -> Sample:
 
 
 def _introduces_replay_gap(a: Sample, b: Sample) -> bool:
-    return any(getattr(a, field) is not None and getattr(b, field) is None for field in _REPLAY_FIELDS)
+    return any(
+        getattr(a.replay_index, field) is not None and getattr(b.replay_index, field) is None
+        for field in _REPLAY_FIELDS
+    )
 
 
 def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
@@ -137,13 +135,12 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
         assert _startswith(short=a.prompt, long=b.prompt), "b.prompt must start with a.prompt"
         assert _startswith(short=a.tokens, long=b.tokens), "b.tokens must start with a.tokens"
         assert obs_len > 0, f"obs_len must be > 0, got {obs_len}"
-        sampling_mask = merge_sampling_masks(a, obs_tokens, b)
-        if a.rollout_routed_experts is not None:
-            assert b.rollout_routed_experts is not None, "cannot merge: a has rollout_routed_experts but b does not"
-            assert a.rollout_routed_experts.shape[0] <= b.rollout_routed_experts.shape[0]
-        if a.rollout_indexer_topk is not None:
-            assert b.rollout_indexer_topk is not None, "cannot merge: a has rollout_indexer_topk but b does not"
-            assert a.rollout_indexer_topk.shape[0] <= b.rollout_indexer_topk.shape[0]
+        replay_index = a.replay_index.merge_turn(b.replay_index, observation_tokens=obs_len)
+        for field in ("routed_experts", "indexer_topk"):
+            if (x := getattr(a.replay_index, field)) is not None:
+                y = getattr(b.replay_index, field)
+                assert y is not None, f"cannot merge: a has {field} but b does not"
+                assert x.num_rows <= y.num_rows, f"cannot merge: a has {x.num_rows} {field} rows, b {y.num_rows}"
         assert a.status == Sample.Status.COMPLETED, f"a.status must be COMPLETED, got {a.status}"
 
         return _create_with_all_fields(
@@ -168,11 +165,9 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             ),
             rollout_topk_token_ids=merge_rollout_topk_logprobs_field(a, b, "rollout_topk_token_ids", obs_len),
             rollout_topk_log_probs=merge_rollout_topk_logprobs_field(a, b, "rollout_topk_log_probs", obs_len),
-            rollout_sampling_mask=sampling_mask,
+            replay_index=replay_index,
             teacher_log_probs=_merge_optional_per_token("teacher_log_probs"),
             opd_reverse_kl=_merge_optional_per_token("opd_reverse_kl"),
-            rollout_routed_experts=b.rollout_routed_experts,
-            rollout_indexer_topk=b.rollout_indexer_topk,
             remove_sample=_merge_equal_value("remove_sample"),
             status=b.status,
             metadata=_merge_metadata(),

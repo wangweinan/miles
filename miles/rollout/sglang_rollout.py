@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import dataclasses
 import logging
 import uuid
 from argparse import Namespace
@@ -8,7 +9,6 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import pybase64
 import sglang_router
 from packaging.version import parse
 from tqdm import tqdm
@@ -39,16 +39,17 @@ from miles.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
+from miles.utils.replay_index import response_has_routed_experts, sampled_logprobs_from_meta_info
 from miles.utils.types import Sample
 
 from .generate_utils.generate_endpoint_utils import (
+    compute_replay_index_from_response,
     compute_routing_headers,
-    get_indexer_topk_from_response,
     policy_uses_routing_key,
 )
 from .generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
 from .generate_utils.sample_utils import reward_log_summary, sample_text_preview
-from .generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
+from .generate_utils.sampling_mask import should_return_sampling_mask
 from .rm_hub import async_rm, batched_async_rm
 
 __all__ = ["generate_rollout", "get_model_url"]
@@ -246,24 +247,21 @@ async def generate(
         new_response_tokens, new_response_log_probs = [], []
 
     if payload.get("return_sampling_mask", False):
-        new_response_log_probs = append_sampling_metadata(
-            sample,
-            new_response_tokens,
+        new_response_log_probs = sampled_logprobs_from_meta_info(
             output["meta_info"],
-            sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
+            support_logprobs=payload.get("sampling_logprobs_mode") == "support",
+            num_output_tokens=len(new_response_tokens),
+            aborted=False,
         )
 
+    previous_response_length = sample.response_length
     # Update sample with tokens directly - avoiding re-tokenization
     sample.tokens = sample.tokens + new_response_tokens
     sample.response_length += len(new_response_tokens)
     sample.response += output["text"]
-    if not evaluation:
-        append_rollout_topk_logprobs(
-            sample,
-            output["meta_info"],
-            args.rollout_top_logprobs_num,
-            sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
-        )
+    # In support mode the trainer derives the candidates from the sampling mask.
+    if not evaluation and payload.get("sampling_logprobs_mode") != "support":
+        append_rollout_topk_logprobs(sample, output["meta_info"], args.rollout_top_logprobs_num)
 
     # When partial rollout and masking off policy is enabled, update the loss mask
     if sample.loss_mask is not None:
@@ -274,29 +272,27 @@ async def generate(
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    if "routed_experts" in output["meta_info"]:
-        _re = np.frombuffer(
-            pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")),
-            dtype=np.int32,
-        )
-        _ntok = int(output["meta_info"]["prompt_tokens"]) + len(new_response_tokens) - 1
-        _topk = _re.size // max(1, _ntok * args.num_layers)
-        if _re.size == (_ntok + 1) * args.num_layers * max(1, _topk):
-            # stop-edge: sglang also forwarded the final token; its routing rows
-            # feed no training position - drop the tail position.
-            _re = _re[: _ntok * args.num_layers * _topk]
-        assert _re.size == _ntok * args.num_layers * _topk, (
-            f"routed_experts buffer {_re.size} != ntok({_ntok}) x layers({args.num_layers}) x topk({_topk}); "
-            f"prompt_tokens={output['meta_info'].get('prompt_tokens')} response={len(new_response_tokens)} "
-            f"unexpanded_tokens={len(sample.tokens)}"
-        )
-        assert _re.size == 0 or _re.any(), (
-            "routed_experts payload is all zeros: the sglang engine did not capture routed experts "
-            "(topk-bypassing --moe-runner-backend such as flashinfer_trtllm?)."
-        )
-        sample.rollout_routed_experts = _re.reshape(_ntok, args.num_layers, _topk)
-    if "indexer_topk" in output["meta_info"]:
-        sample.rollout_indexer_topk = get_indexer_topk_from_response(args, output, sample)
+    replay_index = compute_replay_index_from_response(
+        args,
+        request=payload,
+        meta_info=output["meta_info"],
+        # Counts media-expanded prompt tokens; sglang may also forward the final token (stop edge),
+        # whose routing row feeds no training position and is dropped.
+        routed_experts_rows=(
+            int(output["meta_info"]["prompt_tokens"]) + len(new_response_tokens) - 1
+            if response_has_routed_experts(output["meta_info"])
+            else None
+        ),
+        indexer_topk_rows=len(sample.tokens) - 1,
+        num_output_tokens=len(new_response_tokens),
+        allow_extra_routed_experts_row=True,
+    )
+    if replay_index.routed_experts is None:
+        # A response without routing rows keeps the ones recorded so far.
+        replay_index = dataclasses.replace(replay_index, routed_experts=sample.replay_index.routed_experts)
+    if replay_index.indexer_topk is None:
+        replay_index = dataclasses.replace(replay_index, indexer_topk=sample.replay_index.indexer_topk)
+    sample.replay_index = sample.replay_index.append_response(replay_index, response_length=previous_response_length)
 
     sample.update_from_meta_info(args, output["meta_info"])
 

@@ -30,7 +30,9 @@ _DUMP_PATH_ENV = "MILES_ROUTER_EQ_DUMP_PATH"
 
 
 def _dump_sample(sample: Sample) -> dict:
-    re = sample.rollout_routed_experts
+    re = (
+        None if sample.replay_index.routed_experts is None else sample.replay_index.routed_experts.materialize_rows({})
+    )
     if re is not None:
         arr = np.ascontiguousarray(re, dtype=np.int32)
         experts_shape = list(arr.shape)

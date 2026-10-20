@@ -13,11 +13,18 @@ import safetensors.numpy
 from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
     COMPUTED_FIELDS_V2,
-    ROLLOUT_SAMPLING_MASK_FIELDS,
     decode_samples_and_merge_input_sample,
     encode_samples,
 )
-from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.replay_index import (
+    MASK_LENGTHS,
+    MASK_LOGPROBS,
+    MASK_TOKEN_IDS,
+    SAMPLING_MASK,
+    ReplayIndex,
+    ReplaySegment,
+    ReplaySegments,
+)
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -28,11 +35,26 @@ def _per_call(*spans: tuple[str, int, int]) -> WeightVersionsPerCall:
     )
 
 
-_FIELDS_WITH_SAMPLING_MASK = COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS
-
-
 def _versions(version: str) -> WeightVersionsPerCall:
     return WeightVersionsPerCall(spans=[WeightVersionSpan(version=version, abs_start=0, abs_end=1)])
+
+
+def _mask(lengths: list[int], token_ids: list[int], logprobs: list[float]) -> ReplaySegments:
+    inline = {
+        MASK_LENGTHS: np.asarray(lengths, dtype=np.int32),
+        MASK_TOKEN_IDS: np.asarray(token_ids, dtype=np.int32),
+        MASK_LOGPROBS: np.asarray(logprobs, dtype=np.float32),
+    }
+    return ReplaySegments(SAMPLING_MASK, (ReplaySegment(start=0, stop=len(lengths), inline=inline),))
+
+
+def _replay(routed=None, indexer=None, mask: ReplaySegments | None = None) -> ReplayIndex:
+    index = ReplayIndex.from_arrays(routed_experts=routed, indexer_topk=indexer)
+    return ReplayIndex(routed_experts=index.routed_experts, indexer_topk=index.indexer_topk, sampling_mask=mask)
+
+
+def _routed(index: ReplayIndex) -> np.ndarray:
+    return index.routed_experts.materialize_rows({})
 
 
 def _computed_sample(**overrides) -> Sample:
@@ -43,9 +65,9 @@ def _computed_sample(**overrides) -> Sample:
     s.response_length = 2
     s.loss_mask = [1, 1]
     s.rollout_log_probs = [-0.5, -0.1234567891234567]
-    s.rollout_sampling_mask = RolloutSamplingMask(ids=[10, 4, 11], offsets=[0, 2, 3])
-    s.rollout_routed_experts = np.arange(24, dtype=np.int32).reshape(4, 3, 2)
-    s.rollout_indexer_topk = None
+    s.replay_index = _replay(
+        routed=np.arange(24, dtype=np.int32).reshape(4, 3, 2), mask=_mask([2, 1], [10, 4, 11], [-0.5, -0.25])
+    )
     s.status = Sample.Status.COMPLETED
     s.weight_versions = [_versions("w1"), _versions("w2")]
     s.prefix_cache_info = Sample.PrefixCacheInfo.from_dict({"cached_tokens": 2, "total_prompt_tokens": 3})
@@ -80,8 +102,9 @@ class TestSamplesWireCodec:
             routing_key="rk",
             train_metadata={"loss": "ppo"},
         )
-        payload = encode_samples([_computed_sample()], {"max_trim_tokens": 1}, None, fields=_FIELDS_WITH_SAMPLING_MASK)
-        reply = decode_samples_and_merge_input_sample(payload, template, fields=_FIELDS_WITH_SAMPLING_MASK)
+        sample = _computed_sample()
+        payload = encode_samples([sample], {"max_trim_tokens": 1}, None)
+        reply = decode_samples_and_merge_input_sample(payload, template)
 
         assert reply.empty_reason is None
         assert reply.session_metadata == {"max_trim_tokens": 1}
@@ -89,17 +112,18 @@ class TestSamplesWireCodec:
         # computed fields overlaid, with exact types/values
         assert out.tokens == [1, 2, 3, 10, 11] and type(out.tokens) is list
         assert out.rollout_log_probs == [-0.5, -0.1234567891234567]
-        sampling_mask_ids, sampling_mask_offsets = out.rollout_sampling_mask._as_tensors()
-        assert sampling_mask_ids.tolist() == [10, 4, 11]
-        assert sampling_mask_offsets.tolist() == [0, 2, 3]
+        (piece,) = out.replay_index.sampling_mask.mask_pieces({})
+        assert piece.lengths.tolist() == [2, 1] and piece.token_ids.tolist() == [10, 4, 11]
+        assert piece.logprobs.tolist() == [-0.5, -0.25]
         assert out.loss_mask == [1, 1]
         assert out.response == "[10][11]" and out.response_length == 2
         assert out.status == Sample.Status.COMPLETED
         assert out.weight_versions == [_versions("w1"), _versions("w2")]
         assert out.prefix_cache_info.to_dict() == {"cached_tokens": 2, "total_prompt_tokens": 3}
-        assert out.rollout_routed_experts.dtype == np.int32
-        assert np.array_equal(out.rollout_routed_experts, np.arange(24, dtype=np.int32).reshape(4, 3, 2))
-        assert out.rollout_indexer_topk is None
+        assert _routed(out.replay_index).dtype == np.int32
+        assert np.array_equal(_routed(out.replay_index), np.arange(24, dtype=np.int32).reshape(4, 3, 2))
+        assert out.replay_index.indexer_topk is None
+        assert out.replay_index.to_wire()[0] == sample.replay_index.to_wire()[0]
         # template fields carried from the input sample, untouched
         assert out.group_index == 7 and out.index == 3
         assert out.prompt == [{"role": "user", "content": "hi"}]
@@ -132,7 +156,7 @@ class TestSamplesWireCodec:
         a = _computed_sample(metadata={"server_only": {"sample": "a"}})
         b = _computed_sample(
             tokens=[1, 2, 3, 10, 11, 20, 21, 30],
-            rollout_routed_experts=np.arange(100, 100 + 42, dtype=np.int32).reshape(7, 3, 2),
+            replay_index=_replay(routed=np.arange(100, 100 + 42, dtype=np.int32).reshape(7, 3, 2)),
             rollout_log_probs=[-1.0, -2.0],
             metadata={"server_only": {"sample": "b"}},
         )
@@ -140,8 +164,9 @@ class TestSamplesWireCodec:
         reply = decode_samples_and_merge_input_sample(encode_samples([a, b], {}, None), template)
         out_a, out_b = reply.samples
         assert out_a.tokens == a.tokens and out_b.tokens == b.tokens
-        assert np.array_equal(out_a.rollout_routed_experts, a.rollout_routed_experts)
-        assert np.array_equal(out_b.rollout_routed_experts, b.rollout_routed_experts)
+        assert np.array_equal(_routed(out_a.replay_index), _routed(a.replay_index))
+        assert np.array_equal(_routed(out_b.replay_index), _routed(b.replay_index))
+        assert out_a.replay_index.sampling_mask.num_rows == 2 and out_b.replay_index.sampling_mask is None
         assert out_b.rollout_log_probs == [-1.0, -2.0]
         assert out_a.metadata == {"input_only": {"value": 1}, "server_only": {"sample": "a"}}
         assert out_b.metadata == {"input_only": {"value": 1}, "server_only": {"sample": "b"}}
@@ -174,9 +199,11 @@ class TestSamplesWireCodec:
         routed = np.arange(24, dtype=np.int32).reshape(3, 4, 2).transpose(1, 0, 2)
         indexer = np.arange(48, dtype=np.int32).reshape(8, 3, 2)[::2]
         assert not routed.flags["C_CONTIGUOUS"] and not indexer.flags["C_CONTIGUOUS"]
-        sample = _computed_sample(rollout_routed_experts=routed, rollout_indexer_topk=indexer)
+        sample = _computed_sample(
+            replay_index=_replay(routed=routed, indexer=indexer, mask=_mask([2, 1], [10, 4, 11], [-0.5, -0.25]))
+        )
 
-        payload = encode_samples([sample], {}, None, fields=_FIELDS_WITH_SAMPLING_MASK)
+        payload = encode_samples([sample], {}, None)
         # the reply is a plain safetensors buffer: no Miles framing needed to open it
         tensors = safetensors.numpy.load(payload)
         assert set(tensors) == {
@@ -184,50 +211,49 @@ class TestSamplesWireCodec:
             "tokens.0",
             "loss_mask.0",
             "rollout_log_probs.0",
-            "rollout_sampling_mask.ids.0",
-            "rollout_sampling_mask.offsets.0",
-            "rollout_routed_experts.0",
-            "rollout_indexer_topk.0",
+            "replay_index.routed_experts.0",
+            "replay_index.indexer_topk.0",
+            f"replay_index.{MASK_LENGTHS}.0",
+            f"replay_index.{MASK_TOKEN_IDS}.0",
+            f"replay_index.{MASK_LOGPROBS}.0",
         }
         assert tensors["_samples_meta"].dtype == np.uint8 and tensors["_samples_meta"].ndim == 1
         assert tensors["loss_mask.0"].dtype == np.uint8
 
-        (out,) = decode_samples_and_merge_input_sample(payload, Sample(), fields=_FIELDS_WITH_SAMPLING_MASK).samples
+        (out,) = decode_samples_and_merge_input_sample(payload, Sample()).samples
         assert out.tokens == sample.tokens and type(out.tokens) is list
         assert out.rollout_log_probs == sample.rollout_log_probs
-        assert out.rollout_routed_experts.dtype == np.int32 and out.rollout_routed_experts.shape == (4, 3, 2)
-        assert np.array_equal(out.rollout_routed_experts, routed)
-        assert out.rollout_indexer_topk.dtype == np.int32 and np.array_equal(out.rollout_indexer_topk, indexer)
+        assert _routed(out.replay_index).dtype == np.int32 and _routed(out.replay_index).shape == (4, 3, 2)
+        assert np.array_equal(_routed(out.replay_index), routed)
+        assert np.array_equal(out.replay_index.indexer_topk.materialize_rows({}), indexer)
 
-    def test_tensor_fields_view_a_writable_payload_without_copying(self):
+    def test_replay_rows_view_a_writable_payload_without_copying(self):
         buffer = np.frombuffer(encode_samples([_computed_sample()], {}, None), dtype=np.uint8).copy()
         (out,) = decode_samples_and_merge_input_sample(buffer, Sample()).samples
-        assert np.shares_memory(out.rollout_routed_experts, buffer)
-        np.testing.assert_array_equal(out.rollout_routed_experts, np.arange(24, dtype=np.int32).reshape(4, 3, 2))
+        assert np.shares_memory(_routed(out.replay_index), buffer)
+        np.testing.assert_array_equal(_routed(out.replay_index), np.arange(24, dtype=np.int32).reshape(4, 3, 2))
 
     def test_bytes_payload_decodes_to_writable_tensors(self):
         (out,) = decode_samples_and_merge_input_sample(
             encode_samples([_computed_sample()], {}, None), Sample()
         ).samples
-        assert out.rollout_routed_experts.flags.writeable
+        assert _routed(out.replay_index).flags.writeable
 
-    def test_default_fields_do_not_emit_sampling_mask(self):
-        payload = encode_samples([_computed_sample()], {}, None)
+    def test_sample_without_replay_data_sends_an_empty_index(self):
+        payload = encode_samples([_computed_sample(replay_index=ReplayIndex())], {}, None)
         tensors = safetensors.numpy.load(payload)
         meta = json.loads(tensors["_samples_meta"].tobytes().decode("utf-8"))
 
-        assert "rollout_sampling_mask" not in meta["samples"][0]["nulls"]
-        assert not any(name.startswith("rollout_sampling_mask.") for name in tensors)
+        assert meta["samples"][0]["replay_index"] == {}
+        assert not any(name.startswith("replay_index.") for name in tensors)
         (out,) = decode_samples_and_merge_input_sample(payload, Sample()).samples
-        assert out.rollout_sampling_mask is None
+        assert out.replay_index.is_empty()
 
-    def test_zero_size_tensor_is_distinct_from_none(self):
-        sample = _computed_sample(
-            rollout_routed_experts=np.empty((0, 3, 2), dtype=np.int32), rollout_indexer_topk=None
-        )
+    def test_zero_size_rows_are_distinct_from_none(self):
+        sample = _computed_sample(replay_index=_replay(routed=np.empty((0, 3, 2), dtype=np.int32)))
         (out,) = decode_samples_and_merge_input_sample(encode_samples([sample], {}, None), Sample()).samples
-        assert isinstance(out.rollout_routed_experts, np.ndarray) and out.rollout_routed_experts.shape == (0, 3, 2)
-        assert out.rollout_indexer_topk is None
+        assert out.replay_index.routed_experts.num_rows == 0
+        assert out.replay_index.indexer_topk is None
 
     def test_null_tokens_restore_fresh_empty_lists(self):
         # A null marker restores per-sample fresh instances, never one shared list.
@@ -242,9 +268,14 @@ class TestSamplesWireCodec:
         assert out_a.tokens is not out_b.tokens
 
     def test_encode_rejects_non_int32_replay_dtype(self):
-        sample = _computed_sample(rollout_routed_experts=np.arange(24, dtype=np.int64).reshape(4, 3, 2))
-        with pytest.raises(ValueError, match="rollout_routed_experts must have dtype int32"):
-            encode_samples([sample], {}, None)
+        rows = np.arange(24, dtype=np.int64).reshape(4, 3, 2)
+        index = ReplayIndex(
+            routed_experts=ReplaySegments(
+                "routed_experts", (ReplaySegment(start=0, stop=4, inline={"routed_experts": rows}),)
+            )
+        )
+        with pytest.raises(ValueError, match="replay_index.routed_experts must have dtype int32"):
+            encode_samples([_computed_sample(replay_index=index)], {}, None)
 
     def test_encode_rejects_loss_mask_values_that_wrap_in_uint8(self):
         with pytest.raises(ValueError, match="loss_mask values do not fit wire dtype uint8"):

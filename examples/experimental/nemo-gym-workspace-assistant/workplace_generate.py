@@ -3,8 +3,6 @@
 import math
 from typing import Any
 
-import numpy as np
-
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_hub.agentic_tool_call import generate as agentic_generate
 from miles.utils.types import Sample
@@ -26,16 +24,10 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             raise ValueError("Multi-turn tool observations must be masked out")
         if sample.rollout_log_probs is None or not all(math.isfinite(p) for p in sample.rollout_log_probs):
             raise ValueError("Missing or nonfinite rollout log probabilities")
-        routes = sample.rollout_routed_experts
+        routes = sample.replay_index.routed_experts
         if input.args.use_rollout_routing_replay:
-            if routes is None or routes.shape != (
-                len(sample.tokens) - 1,
-                input.args.num_layers,
-                input.args.moe_router_topk,
-            ):
+            if routes is None or routes.num_rows != len(sample.tokens) - 1:
                 raise ValueError("Missing or misaligned routing replay")
-            if routes.dtype != np.int32 or routes.min() < 0 or routes.max() >= input.args.num_experts:
-                raise ValueError("Invalid routing replay expert indices")
         if sample.metadata["workplace_stop"] in {"truncated", "response_budget", "context_limit", "turn_limit"}:
             sample.status = Sample.Status.TRUNCATED
     return output

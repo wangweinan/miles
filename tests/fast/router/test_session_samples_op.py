@@ -206,7 +206,7 @@ async def test_assembled_sample_golden(core):
             spans=[WeightVersionSpan(version="w2", abs_start=7, abs_end=9)], output_start=7, prompt_tokens=7
         ),
     ]
-    assert np.array_equal(m.rollout_routed_experts, _expected_r3(100, 8))
+    assert np.array_equal(m.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8))
     assert m.prefix_cache_info.to_dict() == {"cached_tokens": 5, "total_prompt_tokens": 10}
     assert m.prompt == [{"role": "user", "content": "hi"}]
     assert m.label == "lbl"
@@ -293,7 +293,7 @@ async def test_truncation_golden(core):
     assert last.tokens == _ACCUMULATED[:8]
     assert last.loss_mask == [1, 1, 0, 0, 1]
     assert last.rollout_log_probs == [-0.125, -0.25, 0.0, 0.0, -0.5]
-    assert np.array_equal(last.rollout_routed_experts, _expected_r3(100, 8)[:-1])
+    assert np.array_equal(last.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8)[:-1])
     assert [segment["turn"] for segment in last.metadata["lifecycle"]] == [1, 2]
 
 
@@ -367,8 +367,8 @@ async def test_addition_assembled_sample_matches_full_reference(addition_core):
     assert m.loss_mask == [1, 1, 0, 0, 1, 1]
     assert m.rollout_log_probs == [-0.125, -0.25, 0.0, 0.0, -0.5, -1.0]
     assert m.status == Sample.Status.COMPLETED
-    assert m.rollout_routed_experts.dtype == np.int32
-    assert np.array_equal(m.rollout_routed_experts, _expected_r3(100, 8))
+    assert m.replay_index.routed_experts.materialize_rows({}).dtype == np.int32
+    assert np.array_equal(m.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8))
 
 
 async def test_addition_truncation_golden(addition_core):
@@ -382,7 +382,7 @@ async def test_addition_truncation_golden(addition_core):
     last = samples[-1]
     assert last.status == Sample.Status.TRUNCATED
     assert last.tokens == _ACCUMULATED[:8]
-    assert np.array_equal(last.rollout_routed_experts, _expected_r3(100, 8)[:-1])
+    assert np.array_equal(last.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 8)[:-1])
 
 
 async def test_addition_turn_boundary_truncation_uses_required_prefix(addition_core):
@@ -394,7 +394,7 @@ async def test_addition_turn_boundary_truncation_uses_required_prefix(addition_c
 
     last = samples[-1]
     assert last.tokens == _ACCUMULATED[:5]
-    assert np.array_equal(last.rollout_routed_experts, _expected_r3(100, 4))
+    assert np.array_equal(last.replay_index.routed_experts.materialize_rows({}), _expected_r3(100, 4))
 
 
 async def test_addition_gap_returns_422(addition_core):

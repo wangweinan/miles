@@ -10,6 +10,8 @@ import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _meta, _Tokenizer
 from tests.fast.fixtures.session_fixtures import make_session_server_config
 
+from miles.backends.training_utils.data.replay import materialize_replay_columns
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
 from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.core import SessionCore
@@ -127,6 +129,7 @@ def test_filtered_session_request_and_producer() -> None:
         "output_token_logprobs": [(math.log(0.4), 2, None)],
         "output_token_sampling_mask": [[2, 3]],
         "output_token_sampling_logprobs": [[math.log(4 / 7), math.log(3 / 7)]],
+        "output_token_sampling_selected_logprobs": [math.log(4 / 7)],
     }
     record = SessionRecord(
         timestamp=2.0,
@@ -145,9 +148,16 @@ def test_filtered_session_request_and_producer() -> None:
         max_trim_tokens=0,
     )
     assert len(samples) == 1
-    validate_rollout_topk_logprobs_sample(samples[0], 3)
-    np.testing.assert_array_equal(samples[0].rollout_topk_token_ids, [[2, 3, -1]])
-    np.testing.assert_allclose(samples[0].rollout_log_probs, [math.log(4 / 7)])
+    # The session keeps the sampled tokens' log-probs; the trainer derives the candidates from the mask.
+    (sample,) = samples
+    assert sample.rollout_topk_token_ids is None
+    assert sample.rollout_log_probs == pytest.approx([math.log(4 / 7)])
+    sample.index, sample.group_index, sample.reward = 0, 0, 1.0
+    args = _args(rollout_sampling_logprobs_mode="support", use_sampling_support_replay=True, loss_type="policy_loss")
+    data = convert_samples_to_train_data(args, [sample], {}, None, None)
+    materialize_replay_columns(args, data)
+    np.testing.assert_array_equal(data["rollout_topk_token_ids"][0], [[2, 3, -1]])
+    np.testing.assert_allclose(data["rollout_log_probs"][0], [math.log(4 / 7)], rtol=1e-6)
 
 
 @pytest.mark.parametrize("candidate_count", [0, 3])

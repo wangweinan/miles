@@ -23,7 +23,6 @@ from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTra
 from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
     COMPUTED_FIELDS_V2,
-    ROLLOUT_SAMPLING_MASK_FIELDS,
     decode_samples_and_merge_input_sample,
     encode_samples,
 )
@@ -727,13 +726,13 @@ async def test_create_selects_wire_fields_by_session_server_version(monkeypatch)
     assert (await OpenAIEndpointTracer.create(args("v2"))).samples_wire_fields == COMPUTED_FIELDS_V2
     assert (
         await OpenAIEndpointTracer.create(args(True, 0.95, 32), sampling_params=sampling_params(0.95, 32))
-    ).samples_wire_fields == (COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
+    ).samples_wire_fields == COMPUTED_FIELDS
     assert (
         await OpenAIEndpointTracer.create(args("v2", 0.95, 32), sampling_params=sampling_params(0.95, 32))
-    ).samples_wire_fields == (COMPUTED_FIELDS_V2 + ROLLOUT_SAMPLING_MASK_FIELDS)
+    ).samples_wire_fields == COMPUTED_FIELDS_V2
     assert (
         await OpenAIEndpointTracer.create(args(True, top_k=32), sampling_params=sampling_params(1.0, 32))
-    ).samples_wire_fields == (COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
+    ).samples_wire_fields == COMPUTED_FIELDS
     assert (
         await OpenAIEndpointTracer.create(
             args(True, 0.95, 32), evaluation=True, sampling_params=sampling_params(0.95, 32)

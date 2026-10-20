@@ -3,14 +3,16 @@
 ``--rollout-top-logprobs-num`` sets the width of ``Sample.rollout_topk_token_ids`` /
 ``rollout_topk_log_probs``; it records the sampling distribution and does not change it.
 ``arguments.py`` derives ``rollout_sampling_logprobs_mode`` from the rollout filters: ``selected`` reads
-``output_top_logprobs``, the top-K of the full-vocabulary distribution (unfiltered sampling);
-``support`` reads ``output_token_sampling_logprobs`` over the whole realized support (filtered
-sampling). ``Sample.rollout_sampling_mask`` is the separate support record of sampling-support replay.
+``output_top_logprobs``, the top-K of the full-vocabulary distribution (unfiltered sampling), on the
+rollout side; ``support`` is the whole realized support (filtered sampling), which the trainer derives
+from the sampling mask of sampling-support replay (``Sample.replay_index``).
 """
 
 import math
 from collections.abc import Mapping
 from typing import Any
+
+import numpy as np
 
 
 def validate_rollout_topk_logprobs_args(args: Any) -> None:
@@ -59,3 +61,52 @@ def validate_rollout_topk_logprobs_sampling(
         raise ValueError("Rollout top-k logprobs collection does not support constrained tool_choice")
     if tool_choice != "none" and any(tool.get("function", {}).get("strict") for tool in sampling.get("tools") or []):
         raise ValueError("Rollout top-k logprobs collection does not support strict tool schemas")
+
+
+def validate_rollout_topk_logprobs(
+    ids: np.ndarray,
+    logps: np.ndarray,
+    *,
+    sampled_log_probs: np.ndarray,
+    response_tokens: np.ndarray,
+    loss_mask: np.ndarray,
+    support: tuple[np.ndarray, np.ndarray] | None,
+) -> None:
+    """Validate one sample's candidate distributions, including custom producers and restored rollouts.
+
+    ``support`` is the sample's sampling mask in CSR form (ids, offsets), when it has one. Full-sample
+    sorting and support matching have significant CPU and memory costs; training callers must enable
+    this validation only under --ci-test.
+    """
+    valid = ids >= 0
+    sorted_ids = np.sort(ids, axis=-1)
+    if ((sorted_ids[:, 1:] >= 0) & (sorted_ids[:, 1:] == sorted_ids[:, :-1])).any():
+        raise ValueError("Duplicate rollout top-k logprobs candidate token IDs")
+    if (loss_mask & ~valid.any(-1)).any():
+        raise ValueError("Every trained token needs rollout top-k logprobs candidates")
+    if support is not None:
+        in_support, lengths = _support_membership(ids, *support)
+        if ((valid != in_support) & loss_mask[:, None]).any() or ((valid.sum(-1) != lengths) & loss_mask).any():
+            raise ValueError("Rollout top-k logprobs candidates must equal the sampling support")
+    matches = (ids == response_tokens[:, None]) & valid & loss_mask[:, None]
+    sampled = np.broadcast_to(np.asarray(sampled_log_probs)[:, None], logps.shape)
+    if not np.allclose(sampled[matches], logps[matches], atol=1e-5, rtol=1e-5):
+        raise ValueError("Sampled and candidate probabilities must come from the same sampler distribution")
+
+
+def _support_membership(
+    ids: np.ndarray, support_ids: np.ndarray, offsets: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Match candidate IDs to ragged support IDs without a per-token Python loop."""
+    n = len(ids)
+    if not n:
+        return np.zeros_like(ids, dtype=bool), np.empty(0, dtype=np.int64)
+    lengths = np.diff(offsets[: n + 1])
+    support_ids = support_ids[: offsets[n]]
+    stride = 1 << 32  # Token IDs are nonnegative int32; rows remain distinct.
+    support_rows = np.repeat(np.arange(n, dtype=np.int64), lengths)
+    support_keys = np.sort(support_rows * stride + support_ids.astype(np.int64))
+    candidate_keys = np.arange(n, dtype=np.int64)[:, None] * stride + ids.astype(np.int64)
+    positions = np.searchsorted(support_keys, candidate_keys)
+    membership = (ids >= 0) & (support_keys[np.minimum(positions, len(support_keys) - 1)] == candidate_keys)
+    return membership, lengths
